@@ -75,6 +75,52 @@ def test_preprocess_audio_file_resample_stereo(tmp_path_factory):
     assert waveform.shape[0] == 1
 
 
+def test_preprocess_audio_file_selects_the_channel_with_higher_rms(
+    tmp_path_factory,
+):
+    sample_rate = 16000
+    num_frames = sample_rate
+    tone = torch.sin(2 * torch.pi * 440 * torch.arange(num_frames) / sample_rate)
+    stereo = torch.stack((0.1 * tone, 0.8 * tone))
+    input_file = tmp_path_factory.mktemp("data") / "stereo_input.wav"
+    output_file = tmp_path_factory.mktemp("data") / "selected_channel.wav"
+    torchaudio.save(input_file, stereo, sample_rate)
+
+    audio_utils.preprocess_audio_file(
+        input_file=input_file,
+        output_file=output_file,
+        sample_rate=sample_rate,
+        num_samples=num_frames,
+    )
+
+    output, _ = torchaudio.load(output_file)
+    assert output.shape == (1, num_frames)
+    assert torch.sqrt(torch.mean(output.square())).item() == pytest.approx(
+        0.8 / np.sqrt(2), abs=1e-3
+    )
+
+
+def test_preprocess_audio_file_does_not_fade_the_retained_tail(tmp_path_factory):
+    sample_rate = 1000
+    input_file = tmp_path_factory.mktemp("data") / "tail_input.wav"
+    output_file = tmp_path_factory.mktemp("data") / "tail_output.wav"
+    waveform = torch.tensor([[1.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0]])
+    torchaudio.save(input_file, waveform, sample_rate)
+
+    audio_utils.preprocess_audio_file(
+        input_file=input_file,
+        output_file=output_file,
+        sample_rate=sample_rate,
+        frame_size=4,
+        hop_size=4,
+        min_tail_silence_ms=1.0,
+    )
+
+    output, _ = torchaudio.load(output_file)
+    assert output.shape == (1, 4)
+    assert output[0, -1].item() == pytest.approx(0.5, abs=1e-3)
+
+
 def test_preprocess_audio_file_resample_pad(tmp_path_factory):
     input_sample_rate = 16000
     target_sample_rate = 48000
@@ -113,8 +159,8 @@ def test_preprocess_audio_file_resample_trim(tmp_path_factory):
     assert waveform.shape[1] == int(target_duration * target_sample_rate)
 
 
-def test_preprocess_audio_file_raises_warning_on_quiet_sound(tmp_path_factory):
-    with pytest.raises(ValueError, match="Entire wavfile below threshold level"):
+def test_preprocess_audio_file_rejects_silent_sound(tmp_path_factory):
+    with pytest.raises(ValueError, match="silent_all"):
         preprocess_audio_file(
             tmp_path_factory,
             amp=1e-6,

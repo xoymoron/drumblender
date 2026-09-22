@@ -1,6 +1,7 @@
 """
 Audio utility functions
 """
+
 from __future__ import annotations
 
 import math
@@ -12,6 +13,8 @@ import torch
 import torchaudio
 from einops import repeat
 
+from drumblender.utils.device import resolve_device
+
 
 def preprocess_audio_file(
     input_file: Path,
@@ -19,61 +22,42 @@ def preprocess_audio_file(
     sample_rate: int,
     num_samples: Optional[int] = None,
     mono: bool = True,
-
-    # --- silent sample filter (분리) ---
     filter_silent_all: bool = True,
-    silent_all_threshold_db: float = -75.0,  # ✅ "silent sample 판정"은 더 낮게
-
-    # --- start silence cut (기존 유지) ---
+    silent_all_threshold_db: float = -75.0,
     remove_start_silence: bool = True,
-    start_silence_threshold_db: float = -60.0,  # ✅ "시작 무음 컷"은 기존대로
-
-    # --- tail cut (옵션) ---
-    remove_end_silence: bool = True,  # ✅ 가변길이 + 14초 제한이면 기본 OFF 권장
+    start_silence_threshold_db: float = -60.0,
+    remove_end_silence: bool = True,
     tail_silence_threshold_db: float = -70.0,
-    tail_fade_out_ms: float = 5.0,
     tail_peak_ratio: float = 0.001,
     min_tail_silence_ms: float = 50.0,
-
-    # --- frame params ---
     frame_size: int = 256,
     hop_size: int = 256,
-
-    # --- max duration (가변 길이일 때만 reject) ---
     max_duration_sec: Optional[float] = 14.0,
+    device: Union[str, torch.device] = "cpu",
 ):
-    """
-    Preprocess an audio file.
+    """Convert one WAV file into the canonical training-audio representation.
 
-    Pipeline:
-      load -> (mono ch0) -> resample
-      -> [optional] silent_all filter (threshold 낮게)
-      -> [optional] cut_start_silence (threshold 기존 유지)
-      -> [optional] cut_end_silence
-      -> [optional] fixed length pad/trunc
-      -> [optional] max duration reject (variable length only)
-      -> save
-
-    Notes:
-      - mono=True일 때 mean downmix가 아니라 채널 0만 사용
-      - normalize(peak/loudness) 없음
+    The variable-length pipeline is: load, select one channel when requested,
+    resample, reject all-silent audio, trim leading/trailing silence, reject
+    samples longer than the configured limit, and save. No loudness or peak
+    normalization is applied. Signal operations use ``device`` (cpu, cuda,
+    cuda:N, or auto); decoding and saving always use CPU tensors.
     """
+    compute_device = resolve_device(device)
     waveform, orig_freq = torchaudio.load(input_file)
     assert waveform.ndim == 2, "Expecting a 2D tensor, channels x samples"
+    waveform = waveform.to(compute_device)
 
-    # Convert to mono: channel 0 only
     if mono:
-        if waveform.shape[0] > 1:
-            waveform = waveform[:1, :]
+        waveform = select_highest_rms_channel(waveform)
         assert waveform.shape[0] == 1, "Expecting a mono signal"
 
-    # Resample
     if orig_freq != sample_rate:
-        waveform = torchaudio.transforms.Resample(
+        resampler = torchaudio.transforms.Resample(
             orig_freq=orig_freq, new_freq=sample_rate
-        )(waveform)
+        ).to(device=compute_device, dtype=waveform.dtype)
+        waveform = resampler(waveform)
 
-    # --- silent sample filter (start 컷과 분리) ---
     if filter_silent_all:
         if is_entirely_silent(
             waveform,
@@ -83,7 +67,6 @@ def preprocess_audio_file(
         ):
             raise ValueError(f"silent_all: below {silent_all_threshold_db}dB")
 
-    # Cut leading silence (기존 방식대로)
     if remove_start_silence:
         waveform = cut_start_silence(
             waveform,
@@ -92,10 +75,8 @@ def preprocess_audio_file(
             threshold_db=start_silence_threshold_db,
         )
 
-    # Cut trailing silence (옵션)
     if remove_end_silence:
         min_tail_silence_samples = int((min_tail_silence_ms / 1000.0) * sample_rate)
-        fade_out_samples = int((tail_fade_out_ms / 1000.0) * sample_rate)
 
         waveform = cut_end_silence(
             waveform,
@@ -104,10 +85,8 @@ def preprocess_audio_file(
             threshold_db=tail_silence_threshold_db,
             min_silence_samples=min_tail_silence_samples,
             peak_ratio=tail_peak_ratio,
-            fade_out_samples=fade_out_samples,
         )
 
-    # --- max duration reject (variable length only) ---
     if max_duration_sec is not None and (num_samples is None):
         max_len = int(max_duration_sec * sample_rate)
         if waveform.shape[1] > max_len:
@@ -115,7 +94,6 @@ def preprocess_audio_file(
                 f"too_long: {waveform.shape[1]} samples > {max_len} samples"
             )
 
-    # Optional fixed length (pad/trunc)
     if num_samples is not None and waveform.shape[1] != num_samples:
         if waveform.shape[1] > num_samples:
             waveform = waveform[:, :num_samples]
@@ -124,7 +102,22 @@ def preprocess_audio_file(
             waveform = torch.nn.functional.pad(waveform, (0, num_pad))
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(output_file, waveform, sample_rate)
+    torchaudio.save(output_file, waveform.cpu(), sample_rate)
+
+
+def select_highest_rms_channel(waveform: torch.Tensor) -> torch.Tensor:
+    """Return the physical input channel with the largest RMS amplitude.
+
+    ``torch.argmax`` deterministically selects the first channel when RMS
+    values tie. A one-channel waveform is returned unchanged.
+    """
+    assert waveform.ndim == 2, "Expecting a 2D tensor, channels x samples"
+    if waveform.shape[0] == 1:
+        return waveform
+
+    channel_rms = torch.sqrt(torch.mean(waveform.square(), dim=1))
+    channel_index = int(torch.argmax(channel_rms).item())
+    return waveform[channel_index : channel_index + 1, :]
 
 
 def generate_sine_wave(
@@ -178,7 +171,7 @@ def cut_start_silence(
             start_samples.append(start_sample)
 
     if len(start_samples) == 0:
-        # start 컷이 실패(전체가 threshold 아래)인 경우
+        # No frame cleared the onset threshold.
         raise ValueError(f"Entire wavfile below threshold level {threshold_db}dB")
 
     return x[:, min(start_samples) :]
@@ -195,7 +188,7 @@ def is_entirely_silent(
     x: [C, T]
     """
     assert x.ndim == 2, "Expecting (channels, num_samples)"
-    C, T = x.shape
+    _, T = x.shape
     if T == 0:
         return True
 
@@ -222,8 +215,6 @@ def cut_end_silence(
     threshold_db: float = -60.0,
     min_silence_samples: int = 0,
     peak_ratio: float = 0.02,
-    fade_out_samples: int = 0,
-
 ) -> torch.Tensor:
     """
     Removes silent samples from the end of a waveform.
@@ -234,7 +225,7 @@ def cut_end_silence(
       - tail frames (mean power) are below threshold_db (power dB)
     """
     assert x.ndim == 2, "Expecting (channels, num_samples)"
-    C, T = x.shape
+    _, T = x.shape
     if T == 0:
         return x
 
@@ -258,7 +249,7 @@ def cut_end_silence(
             silent = bool(torch.all(power <= thr_power).item())
         silent_flags.append(silent)
 
-    # find last non-silent frame from the end
+    # Find the last non-silent frame.
     last_non_silent_idx = None
     for i in range(num_frames - 1, -1, -1):
         if not silent_flags[i]:
@@ -277,17 +268,6 @@ def cut_end_silence(
         float(x[:, candidate_cut:].abs().max().item()) if candidate_cut < T else 0.0
     )
     if tail_peak <= peak_ratio * global_peak:
-        y = x[:, :candidate_cut]
-
-        # ✅ 끝부분 5ms(=fade_out_samples) 선형 페이드 아웃
-        if fade_out_samples and fade_out_samples > 0:
-            T2 = y.shape[1]
-            n = min(int(fade_out_samples), T2)
-            if n > 1:
-                ramp = torch.linspace(1.0, 0.0, steps=n, device=y.device, dtype=y.dtype)
-                y[:, T2 - n : T2] = y[:, T2 - n : T2] * ramp.unsqueeze(0)
-
-        return y
-
+        return x[:, :candidate_cut]
 
     return x

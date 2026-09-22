@@ -1,187 +1,316 @@
-# scripts/preprocess_datasets_pure.py
+"""Preprocess raw WAV sample packs while preserving their folder structure."""
+
 from __future__ import annotations
 
+import argparse
 import json
+import math
+import re
 import shutil
+import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
-from tqdm import tqdm
-
-from drumblender.utils.audio import preprocess_audio_file
+# Allow direct execution from a source checkout without an editable install.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 @dataclass
 class Config:
-    raw_root: Path = Path("/public/datasets/datasets_pure")
-    processed_root: Path = Path("/private/datasets/processed")
-    rejected_root: Path = Path("/private/datasets/rejected")
-    logs_root: Path = Path("/private/datasets/logs")
+    """Input/output locations and audio preprocessing policy."""
 
-    sample_rate: int = 48000
-    num_samples: Optional[int] = None  # ✅ 가변 길이 저장
-
-    # ✅ silent_all 판정(“진짜 무음 파일만” 걸러내기): 더 낮게
+    raw_root: Path
+    processed_root: Path
+    rejected_root: Path
+    logs_root: Path
+    sample_rate: int = 48_000
+    num_samples: Optional[int] = None
+    max_duration_sec: Optional[float] = 14.0
+    mono: bool = True
     filter_silent_all: bool = True
     silent_all_threshold_db: float = -75.0
-
-    # ✅ 시작 무음 컷은 기존 방식대로(-60 유지)
     remove_start_silence: bool = True
     start_silence_threshold_db: float = -60.0
-
-    # ✅ tail cut은 기본 OFF (필요하면 True로)
     remove_end_silence: bool = True
     tail_silence_threshold_db: float = -70.0
     tail_peak_ratio: float = 0.001
     min_tail_silence_ms: float = 50.0
-    tail_fade_out_ms: float = 5.0
-
     frame_size: int = 256
     hop_size: int = 256
-
-    # ✅ 길이 제한(14초 초과 reject)
-    max_duration_sec: float = 14.0
-
     copy_rejected: bool = True
+    device: str = "cpu"
 
 
-def mkdir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
+def parse_args(argv: Optional[list[str]] = None) -> Config:
+    """Parse explicit server paths and optional signal-processing settings."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", "--raw_root", dest="raw_root", type=Path, required=True)
+    parser.add_argument(
+        "--output", "--processed_root", dest="processed_root", type=Path, required=True
+    )
+    parser.add_argument(
+        "--rejected", "--rejected_root", dest="rejected_root", type=Path, required=True
+    )
+    parser.add_argument("--logs", "--logs_root", dest="logs_root", type=Path, required=True)
+
+    parser.add_argument("--sample-rate", type=int, default=Config.sample_rate)
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=Config.num_samples,
+        help="Fixed output length in samples. Default keeps variable-length audio.",
+    )
+    parser.add_argument(
+        "--max-duration-sec",
+        type=float,
+        default=Config.max_duration_sec,
+        help="Reject longer variable-length samples; use 0 to disable.",
+    )
+    parser.add_argument(
+        "--mono",
+        action=argparse.BooleanOptionalAction,
+        default=Config.mono,
+        help="Keep only the channel with the highest RMS (default: enabled).",
+    )
+    parser.add_argument(
+        "--filter-silent-all",
+        action=argparse.BooleanOptionalAction,
+        default=Config.filter_silent_all,
+    )
+    parser.add_argument(
+        "--silent-all-threshold-db", type=float, default=Config.silent_all_threshold_db
+    )
+    parser.add_argument(
+        "--remove-start-silence",
+        action=argparse.BooleanOptionalAction,
+        default=Config.remove_start_silence,
+    )
+    parser.add_argument(
+        "--start-silence-threshold-db",
+        type=float,
+        default=Config.start_silence_threshold_db,
+    )
+    parser.add_argument(
+        "--remove-end-silence",
+        action=argparse.BooleanOptionalAction,
+        default=Config.remove_end_silence,
+    )
+    parser.add_argument(
+        "--tail-silence-threshold-db",
+        type=float,
+        default=Config.tail_silence_threshold_db,
+    )
+    parser.add_argument("--tail-peak-ratio", type=float, default=Config.tail_peak_ratio)
+    parser.add_argument(
+        "--min-tail-silence-ms", type=float, default=Config.min_tail_silence_ms
+    )
+    parser.add_argument("--frame-size", type=int, default=Config.frame_size)
+    parser.add_argument("--hop-size", type=int, default=Config.hop_size)
+    parser.add_argument(
+        "--copy-rejected",
+        action=argparse.BooleanOptionalAction,
+        default=Config.copy_rejected,
+    )
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        help="Processing device: cpu, cuda, cuda:N, or auto.",
+    )
+
+    values = vars(parser.parse_args(argv))
+    if values["max_duration_sec"] == 0:
+        values["max_duration_sec"] = None
+    config = Config(**values)
+    validate_config(config)
+    return config
 
 
-def classify_reason(err: Exception) -> str:
-    msg = str(err).lower()
+def validate_config(config: Config) -> None:
+    """Reject invalid signal settings and unsafe/overlapping directory paths."""
+    if config.sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if config.num_samples is not None and config.num_samples <= 0:
+        raise ValueError("num_samples must be positive when specified")
+    if config.max_duration_sec is not None and config.max_duration_sec <= 0:
+        raise ValueError("max_duration_sec must be positive when specified")
+    if config.frame_size <= 0 or config.hop_size <= 0:
+        raise ValueError("frame_size and hop_size must be positive")
+    if config.min_tail_silence_ms < 0:
+        raise ValueError("min_tail_silence_ms cannot be negative")
+    if config.tail_peak_ratio < 0:
+        raise ValueError("tail_peak_ratio cannot be negative")
+    numeric_settings = [
+        config.silent_all_threshold_db,
+        config.start_silence_threshold_db,
+        config.tail_silence_threshold_db,
+        config.tail_peak_ratio,
+        config.min_tail_silence_ms,
+    ]
+    if config.max_duration_sec is not None:
+        numeric_settings.append(config.max_duration_sec)
+    if not all(math.isfinite(value) for value in numeric_settings):
+        raise ValueError("Audio thresholds and durations must be finite numbers")
+    if config.device not in {"cpu", "cuda", "auto"} and not re.fullmatch(
+        r"cuda:\d+", config.device
+    ):
+        raise ValueError("device must be cpu, cuda, cuda:N, or auto")
 
-    if "too_long" in msg:
+    path_fields = ("raw_root", "processed_root", "rejected_root", "logs_root")
+    for field in path_fields:
+        setattr(config, field, getattr(config, field).expanduser().resolve())
+    if not config.raw_root.is_dir():
+        raise NotADirectoryError(config.raw_root)
+
+    roots = [getattr(config, field) for field in path_fields]
+    for index, left in enumerate(roots):
+        for right in roots[index + 1 :]:
+            if left.is_relative_to(right) or right.is_relative_to(left):
+                raise ValueError(f"Processing directories must not overlap: {left}, {right}")
+
+
+def classify_reason(error: Exception) -> str:
+    """Map preprocessing errors to the established rejection categories."""
+    message = str(error).lower()
+    if "too_long" in message:
         return "too_long"
-
-    # audio.py에서 silent_all을 이렇게 던짐:
-    #   ValueError(f"silent_all: below {silent_all_threshold_db}dB")
-    if "silent_all" in msg:
+    if "silent_all" in message or "entire wavfile below threshold" in message:
         return "silent_all"
-
-    # start cut 쪽에서 전체가 threshold 아래면 이런 메시지로도 나올 수 있음
-    if "entire wavfile below threshold" in msg:
-        return "silent_all"
-
-    if "near) zero" in msg or "near zero" in msg:
+    if "near zero" in message or "near) zero" in message:
         return "zero"
-
-    if "sox" in msg or "ffmpeg" in msg:
+    if "sox" in message or "ffmpeg" in message:
         return "decode_error"
-
     return "error"
 
 
-def write_jsonl(path: Path, obj: dict) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+def append_manifest(path: Path, record: dict[str, object]) -> None:
+    """Append one UTF-8 JSON record to a JSON Lines manifest."""
+    with path.open("a", encoding="utf-8") as manifest:
+        manifest.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def main():
-    cfg = Config()
+def timestamp_utc() -> str:
+    """Return an ISO 8601 UTC timestamp."""
+    return datetime.now(timezone.utc).isoformat()
 
-    mkdir(cfg.processed_root)
-    mkdir(cfg.rejected_root)
-    mkdir(cfg.logs_root)
 
-    ok_log = cfg.logs_root / "manifest_ok.jsonl"
-    bad_log = cfg.logs_root / "manifest_bad.jsonl"
+def process_file(
+    input_path: Path,
+    config: Config,
+    device: object,
+    ok_manifest: Path,
+    bad_manifest: Path,
+    preprocess: Callable[..., None],
+) -> bool:
+    """Process one WAV, preserving its relative path in the output tree."""
+    relative_path = input_path.relative_to(config.raw_root)
+    output_path = config.processed_root / relative_path
 
-    # ✅ .wav / .WAV 모두 포함 (대소문자 무시)
-    wavs = [p for p in cfg.raw_root.rglob("*") if p.is_file() and p.suffix.lower() == ".wav"]
-    wavs.sort()
-    print(f"[scan] {cfg.raw_root} -> {len(wavs)} wavs")
+    try:
+        preprocess(
+            input_file=input_path,
+            output_file=output_path,
+            sample_rate=config.sample_rate,
+            num_samples=config.num_samples,
+            mono=config.mono,
+            filter_silent_all=config.filter_silent_all,
+            silent_all_threshold_db=config.silent_all_threshold_db,
+            remove_start_silence=config.remove_start_silence,
+            start_silence_threshold_db=config.start_silence_threshold_db,
+            remove_end_silence=config.remove_end_silence,
+            tail_silence_threshold_db=config.tail_silence_threshold_db,
+            tail_peak_ratio=config.tail_peak_ratio,
+            min_tail_silence_ms=config.min_tail_silence_ms,
+            frame_size=config.frame_size,
+            hop_size=config.hop_size,
+            max_duration_sec=config.max_duration_sec,
+            device=device,
+        )
+    except Exception as error:
+        if output_path.exists():
+            output_path.unlink()
 
-    ok = 0
-    bad = 0
+        reason = classify_reason(error)
+        rejected_path = config.rejected_root / reason / relative_path
+        copy_error = None
+        if config.copy_rejected:
+            try:
+                rejected_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(input_path, rejected_path)
+            except OSError as exc:
+                copy_error = str(exc)
 
-    pbar = tqdm(wavs, desc="preprocess", unit="file", dynamic_ncols=True)
-    for in_path in pbar:
-        rel = in_path.relative_to(cfg.raw_root)
-        out_path = cfg.processed_root / rel
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        record: dict[str, object] = {
+            "ts": timestamp_utc(),
+            "status": "bad",
+            "reason": reason,
+            "input": str(input_path),
+            "error": str(error),
+        }
+        if copy_error is not None:
+            record["copy_error"] = copy_error
+        append_manifest(bad_manifest, record)
+        return False
 
-        try:
-            preprocess_audio_file(
-                input_file=in_path,
-                output_file=out_path,
-                sample_rate=cfg.sample_rate,
-                num_samples=cfg.num_samples,
-                mono=True,  # 채널0 고정
+    append_manifest(
+        ok_manifest,
+        {
+            "ts": timestamp_utc(),
+            "status": "ok",
+            "input": str(input_path),
+            "output": str(output_path),
+        },
+    )
+    return True
 
-                # ✅ 논의 반영: silent_all 필터 / start 컷 threshold 분리
-                filter_silent_all=cfg.filter_silent_all,
-                silent_all_threshold_db=cfg.silent_all_threshold_db,
 
-                remove_start_silence=cfg.remove_start_silence,
-                start_silence_threshold_db=cfg.start_silence_threshold_db,
+def main(argv: Optional[list[str]] = None) -> None:
+    """Preprocess every WAV under the input root and print a summary."""
+    config = parse_args(argv)
 
-                # ✅ tail cut 옵션
-                remove_end_silence=cfg.remove_end_silence,
-                tail_silence_threshold_db=cfg.tail_silence_threshold_db,
-                tail_peak_ratio=cfg.tail_peak_ratio,
-                min_tail_silence_ms=cfg.min_tail_silence_ms,
-                tail_fade_out_ms=cfg.tail_fade_out_ms,
+    from tqdm import tqdm
+    from drumblender.utils.audio import preprocess_audio_file
+    from drumblender.utils.device import check_device, resolve_device
 
-                frame_size=cfg.frame_size,
-                hop_size=cfg.hop_size,
+    # Validate CUDA once before creating outputs or classifying any files.
+    device = resolve_device(config.device)
+    check_device(device)
+    print(f"[device] signal processing: {device}; audio I/O: cpu")
 
-                # ✅ 14초 제한
-                max_duration_sec=cfg.max_duration_sec,
-            )
+    config.processed_root.mkdir(parents=True, exist_ok=True)
+    config.rejected_root.mkdir(parents=True, exist_ok=True)
+    config.logs_root.mkdir(parents=True, exist_ok=True)
+    ok_manifest = config.logs_root / "manifest_ok.jsonl"
+    bad_manifest = config.logs_root / "manifest_bad.jsonl"
 
-            ok += 1
-            write_jsonl(
-                ok_log,
-                {
-                    "ts": datetime.utcnow().isoformat(),
-                    "status": "ok",
-                    "input": str(in_path),
-                    "output": str(out_path),
-                },
-            )
+    wav_paths = sorted(
+        path
+        for path in config.raw_root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".wav"
+    )
+    print(f"[scan] {config.raw_root} -> {len(wav_paths)} WAV files")
 
-        except Exception as e:
-            bad += 1
-            reason = classify_reason(e)
+    succeeded = 0
+    progress = tqdm(wav_paths, desc="preprocess", unit="file", dynamic_ncols=True)
+    for input_path in progress:
+        if process_file(
+            input_path,
+            config,
+            device,
+            ok_manifest,
+            bad_manifest,
+            preprocess_audio_file,
+        ):
+            succeeded += 1
+        progress.set_postfix(processed=succeeded, rejected=len(wav_paths) - succeeded)
 
-            rej_path = cfg.rejected_root / reason / rel
-            rej_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if cfg.copy_rejected:
-                try:
-                    shutil.copy2(in_path, rej_path)
-                except Exception:
-                    pass
-
-            # processed에 부분 생성된 파일 있으면 제거(최종본 정책)
-            if out_path.exists():
-                try:
-                    out_path.unlink()
-                except Exception:
-                    pass
-
-            write_jsonl(
-                bad_log,
-                {
-                    "ts": datetime.utcnow().isoformat(),
-                    "status": "bad",
-                    "reason": reason,
-                    "input": str(in_path),
-                    "error": str(e),
-                },
-            )
-
-        pbar.set_postfix(ok=ok, bad=bad)
-
-    print("[done]")
-    print(f"  ok : {ok_log}")
-    print(f"  bad: {bad_log}")
-    print(f"  processed root: {cfg.processed_root}")
-    print(f"  rejected  root: {cfg.rejected_root}")
+    rejected = len(wav_paths) - succeeded
+    print(f"[done] processed={succeeded}, rejected={rejected}")
+    print(f"  processed root: {config.processed_root}")
+    print(f"  rejected root: {config.rejected_root}")
+    print(f"  manifests: {ok_manifest}, {bad_manifest}")
 
 
 if __name__ == "__main__":
