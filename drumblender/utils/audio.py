@@ -22,26 +22,25 @@ def preprocess_audio_file(
     sample_rate: int,
     num_samples: Optional[int] = None,
     mono: bool = True,
-    filter_silent_all: bool = True,
-    silent_all_threshold_db: float = -75.0,
+    silence_threshold_db: float = -65.0,
     remove_start_silence: bool = True,
-    start_silence_threshold_db: float = -60.0,
-    remove_end_silence: bool = True,
+    remove_end_silence: bool = False,
     tail_silence_threshold_db: float = -70.0,
     tail_peak_ratio: float = 0.001,
     min_tail_silence_ms: float = 50.0,
     frame_size: int = 256,
     hop_size: int = 256,
-    max_duration_sec: Optional[float] = 14.0,
+    max_duration_sec: Optional[float] = 20.0,
     device: Union[str, torch.device] = "cpu",
 ):
     """Convert one WAV file into the canonical training-audio representation.
 
     The variable-length pipeline is: load, select one channel when requested,
-    resample, reject all-silent audio, trim leading/trailing silence, reject
-    samples longer than the configured limit, and save. No loudness or peak
-    normalization is applied. Signal operations use ``device`` (cpu, cuda,
-    cuda:N, or auto); decoding and saving always use CPU tensors.
+    resample, find the first frame above ``silence_threshold_db``, trim silence,
+    reject samples longer than the configured limit, and save. The onset scan
+    is also the all-silent rejection check, so the waveform is scanned once.
+    No loudness or peak normalization is applied. Signal operations use
+    ``device`` (cpu, cuda, cuda:N, or auto); decoding and saving use CPU tensors.
     """
     compute_device = resolve_device(device)
     waveform, orig_freq = torchaudio.load(input_file)
@@ -58,22 +57,16 @@ def preprocess_audio_file(
         ).to(device=compute_device, dtype=waveform.dtype)
         waveform = resampler(waveform)
 
-    if filter_silent_all:
-        if is_entirely_silent(
-            waveform,
-            frame_size=frame_size,
-            hop_size=hop_size,
-            threshold_db=silent_all_threshold_db,
-        ):
-            raise ValueError(f"silent_all: below {silent_all_threshold_db}dB")
-
+    onset_sample = first_non_silent_sample_multichannel(
+        waveform,
+        frame_size=frame_size,
+        hop_size=hop_size,
+        threshold_db=silence_threshold_db,
+    )
+    if onset_sample is None:
+        raise ValueError(f"silent_all: below {silence_threshold_db}dB")
     if remove_start_silence:
-        waveform = cut_start_silence(
-            waveform,
-            frame_size=frame_size,
-            hop_size=hop_size,
-            threshold_db=start_silence_threshold_db,
-        )
+        waveform = waveform[:, onset_sample:]
 
     if remove_end_silence:
         min_tail_silence_samples = int((min_tail_silence_ms / 1000.0) * sample_rate)
@@ -134,78 +127,85 @@ def first_non_silent_sample(
     x: torch.Tensor,
     frame_size: int = 256,
     hop_size: int = 256,
-    threshold_db: float = -60.0,
+    threshold_db: float = -65.0,
 ) -> Union[int, None]:
     """
     Returns the index of the first non-silent sample in a waveform.
     Implementation based on Essentia StartStopCut.
     """
     assert x.ndim == 1, "Expecting a 1D tensor"
-    frames = torch.split(x, frame_size)
-    thrshold_power = float(np.power(10.0, threshold_db / 10.0))
+    threshold_power = float(np.power(10.0, threshold_db / 10.0))
 
-    for i, frame in enumerate(frames):
+    for start in range(0, x.shape[-1], hop_size):
+        frame = x[start : start + frame_size]
         power = torch.inner(frame, frame) / frame.shape[-1]
-        if power > thrshold_power:
-            return i * hop_size
+        if power > threshold_power:
+            return start
     return None
+
+
+def first_non_silent_sample_multichannel(
+    x: torch.Tensor,
+    frame_size: int = 256,
+    hop_size: int = 256,
+    threshold_db: float = -65.0,
+) -> Optional[int]:
+    """Return the earliest frame above the threshold in any channel."""
+    assert x.ndim == 2, "Expecting (channels, num_samples)"
+    start_samples = [
+        first_non_silent_sample(
+            channel,
+            frame_size=frame_size,
+            hop_size=hop_size,
+            threshold_db=threshold_db,
+        )
+        for channel in x
+    ]
+    valid_starts = [start for start in start_samples if start is not None]
+    return min(valid_starts) if valid_starts else None
 
 
 def cut_start_silence(
     x: torch.Tensor,
     frame_size: int = 256,
     hop_size: int = 256,
-    threshold_db: float = -60.0,
+    threshold_db: float = -65.0,
 ) -> torch.Tensor:
     """
     Removes silent samples from the beginning of a waveform.
     """
     assert x.ndim == 2, "Expecting (channels, num_samples)"
 
-    start_samples = []
-    for channel in x:
-        start_sample = first_non_silent_sample(
-            channel, frame_size=frame_size, hop_size=hop_size, threshold_db=threshold_db
-        )
-        if start_sample is not None:
-            start_samples.append(start_sample)
-
-    if len(start_samples) == 0:
-        # No frame cleared the onset threshold.
-        raise ValueError(f"Entire wavfile below threshold level {threshold_db}dB")
-
-    return x[:, min(start_samples) :]
+    start_sample = first_non_silent_sample_multichannel(
+        x,
+        frame_size=frame_size,
+        hop_size=hop_size,
+        threshold_db=threshold_db,
+    )
+    if start_sample is None:
+        raise ValueError(f"silent_all: below {threshold_db}dB")
+    return x[:, start_sample:]
 
 
 def is_entirely_silent(
     x: torch.Tensor,
     frame_size: int = 256,
     hop_size: int = 256,
-    threshold_db: float = -75.0,
+    threshold_db: float = -65.0,
 ) -> bool:
     """
     True if ALL frames are below threshold_db (power dB).
     x: [C, T]
     """
-    assert x.ndim == 2, "Expecting (channels, num_samples)"
-    _, T = x.shape
-    if T == 0:
-        return True
-
-    thr_power = float(np.power(10.0, threshold_db / 10.0))
-    num_frames = int(math.ceil(T / hop_size))
-
-    for i in range(num_frames):
-        start = i * hop_size
-        end = min(start + frame_size, T)
-        frame = x[:, start:end]
-        if frame.numel() == 0:
-            continue
-        power = (frame * frame).mean(dim=1)  # [C]
-        if bool(torch.any(power > thr_power).item()):
-            return False
-
-    return True
+    return (
+        first_non_silent_sample_multichannel(
+            x,
+            frame_size=frame_size,
+            hop_size=hop_size,
+            threshold_db=threshold_db,
+        )
+        is None
+    )
 
 
 def cut_end_silence(

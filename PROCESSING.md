@@ -18,7 +18,10 @@ Audio decoding/encoding runs on CPU; waveform operations use the selected device
 
 Sample rate, fixed output length, duration limit, channel selection, silence
 thresholds, frame/hop sizes, and rejected-file copying can be changed through
-CLI options. Their defaults preserve the current raw-processing policy.
+CLI options. The default maximum duration is 20 seconds. A single -65 dB frame
+threshold is used for both all-silent rejection and leading-silence trimming.
+Trailing silence removal is disabled by default to preserve natural decay; use
+`--remove-end-silence` only when a dataset needs explicit tail cleanup.
 
 ## Device selection
 

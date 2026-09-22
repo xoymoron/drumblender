@@ -28,13 +28,11 @@ class Config:
     logs_root: Path
     sample_rate: int = 48_000
     num_samples: Optional[int] = None
-    max_duration_sec: Optional[float] = 14.0
+    max_duration_sec: Optional[float] = 20.0
     mono: bool = True
-    filter_silent_all: bool = True
-    silent_all_threshold_db: float = -75.0
+    silence_threshold_db: float = -65.0
     remove_start_silence: bool = True
-    start_silence_threshold_db: float = -60.0
-    remove_end_silence: bool = True
+    remove_end_silence: bool = False
     tail_silence_threshold_db: float = -70.0
     tail_peak_ratio: float = 0.001
     min_tail_silence_ms: float = 50.0
@@ -47,14 +45,18 @@ class Config:
 def parse_args(argv: Optional[list[str]] = None) -> Config:
     """Parse explicit server paths and optional signal-processing settings."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", "--raw_root", dest="raw_root", type=Path, required=True)
+    parser.add_argument(
+        "--input", "--raw_root", dest="raw_root", type=Path, required=True
+    )
     parser.add_argument(
         "--output", "--processed_root", dest="processed_root", type=Path, required=True
     )
     parser.add_argument(
         "--rejected", "--rejected_root", dest="rejected_root", type=Path, required=True
     )
-    parser.add_argument("--logs", "--logs_root", dest="logs_root", type=Path, required=True)
+    parser.add_argument(
+        "--logs", "--logs_root", dest="logs_root", type=Path, required=True
+    )
 
     parser.add_argument("--sample-rate", type=int, default=Config.sample_rate)
     parser.add_argument(
@@ -76,22 +78,12 @@ def parse_args(argv: Optional[list[str]] = None) -> Config:
         help="Keep only the channel with the highest RMS (default: enabled).",
     )
     parser.add_argument(
-        "--filter-silent-all",
-        action=argparse.BooleanOptionalAction,
-        default=Config.filter_silent_all,
-    )
-    parser.add_argument(
-        "--silent-all-threshold-db", type=float, default=Config.silent_all_threshold_db
+        "--silence-threshold-db", type=float, default=Config.silence_threshold_db
     )
     parser.add_argument(
         "--remove-start-silence",
         action=argparse.BooleanOptionalAction,
         default=Config.remove_start_silence,
-    )
-    parser.add_argument(
-        "--start-silence-threshold-db",
-        type=float,
-        default=Config.start_silence_threshold_db,
     )
     parser.add_argument(
         "--remove-end-silence",
@@ -143,8 +135,7 @@ def validate_config(config: Config) -> None:
     if config.tail_peak_ratio < 0:
         raise ValueError("tail_peak_ratio cannot be negative")
     numeric_settings = [
-        config.silent_all_threshold_db,
-        config.start_silence_threshold_db,
+        config.silence_threshold_db,
         config.tail_silence_threshold_db,
         config.tail_peak_ratio,
         config.min_tail_silence_ms,
@@ -168,7 +159,9 @@ def validate_config(config: Config) -> None:
     for index, left in enumerate(roots):
         for right in roots[index + 1 :]:
             if left.is_relative_to(right) or right.is_relative_to(left):
-                raise ValueError(f"Processing directories must not overlap: {left}, {right}")
+                raise ValueError(
+                    f"Processing directories must not overlap: {left}, {right}"
+                )
 
 
 def classify_reason(error: Exception) -> str:
@@ -176,7 +169,7 @@ def classify_reason(error: Exception) -> str:
     message = str(error).lower()
     if "too_long" in message:
         return "too_long"
-    if "silent_all" in message or "entire wavfile below threshold" in message:
+    if "silent_all" in message:
         return "silent_all"
     if "near zero" in message or "near) zero" in message:
         return "zero"
@@ -215,10 +208,8 @@ def process_file(
             sample_rate=config.sample_rate,
             num_samples=config.num_samples,
             mono=config.mono,
-            filter_silent_all=config.filter_silent_all,
-            silent_all_threshold_db=config.silent_all_threshold_db,
+            silence_threshold_db=config.silence_threshold_db,
             remove_start_silence=config.remove_start_silence,
-            start_silence_threshold_db=config.start_silence_threshold_db,
             remove_end_silence=config.remove_end_silence,
             tail_silence_threshold_db=config.tail_silence_threshold_db,
             tail_peak_ratio=config.tail_peak_ratio,
