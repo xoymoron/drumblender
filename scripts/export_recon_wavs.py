@@ -1,42 +1,14 @@
 #!/usr/bin/env python3
-"""
-Export and package reconstruction artifacts for easy sharing.
+"""Export checkpoint reconstructions and run the test-set evaluation.
 
-Outputs include:
-- Reconstruction wav files (and optional targets)
-- Selected checkpoint
-- Evaluation summary/loss stats on the selected split
-- Per-file loss CSV
-- Config files and useful training logs
-- A final tar.gz archive for transfer (scp-friendly)
-"""
-
-"""
-HOW TO USE: 
-
-cd /root/drumblender
-
-python scripts/export_recon_wavs.py \
-  --config cfg/05_all_parallel.yaml \
-  --ckpt /root/drumblender/ckpt/last.ckpt \
-  --data-dir ../datasets/modal_features/processed_modal_flat \
-  --audio-dir ../samples/processed \
-  --meta-file metadata.json \
-  --split test \
-  --split-strategy sample_pack \
-  --parameter-key feature_file \
-  --expected-num-modes 64 \
-  --seed 20260218 \
-  --sample-rate 48000 \
-  --num-samples none \
-  --output-dir /root/drumblender/logs/recon_bundle_05_last \
-  --save-target \
-  --make-tar
+One unfiltered export produces whole-test and top-level-pack reports via
+scripts/compile_results.py. See scripts/evaluation.md for the command and
+output layout. Use --sample-pack-key only to restrict the selected packs.
 """
 
 import argparse
 import csv
-import importlib
+import hashlib
 import json
 import os
 import shutil
@@ -50,10 +22,10 @@ from typing import Any, Dict, Optional
 import torch
 import torchaudio
 import yaml
-from torchmetrics import Metric
 from tqdm import tqdm
 
 from drumblender.data.audio import AudioWithParametersDataset
+from drumblender.metrics import audio_pair_fingerprint, load_evaluation_metrics, score_reconstruction
 from drumblender.utils.model import load_model
 
 
@@ -116,25 +88,6 @@ def _optional_int(value: str) -> Optional[int]:
     if v in {"none", "null", ""}:
         return None
     return int(value)
-
-
-def _resolve_class(class_path: str):
-    module_name, class_name = class_path.rsplit(".", 1)
-    module = importlib.import_module(module_name)
-    return getattr(module, class_name)
-
-
-def _instantiate_from_spec(spec: Any):
-    if isinstance(spec, dict):
-        if "class_path" in spec:
-            cls = _resolve_class(spec["class_path"])
-            init_args = spec.get("init_args", {})
-            resolved = {k: _instantiate_from_spec(v) for k, v in init_args.items()}
-            return cls(**resolved)
-        return {k: _instantiate_from_spec(v) for k, v in spec.items()}
-    if isinstance(spec, list):
-        return [_instantiate_from_spec(x) for x in spec]
-    return spec
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -534,6 +487,11 @@ def _resolve_data_args(args: argparse.Namespace) -> Dict[str, Any]:
         "expected_num_modes": expected_num_modes,
         "seed": int(seed),
         "sample_pack_keys": sample_pack_keys,
+        "split_train_ratio": dataset_kwargs.get("split_train_ratio", 0.8),
+        "split_val_ratio": dataset_kwargs.get("split_val_ratio", 0.1),
+        "normalize": dataset_kwargs.get("normalize", False),
+        "sample_types": dataset_kwargs.get("sample_types"),
+        "instruments": dataset_kwargs.get("instruments"),
     }
 
 
@@ -589,12 +547,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-dir", type=str, default=None, help="Original wav root")
     parser.add_argument("--meta-file", type=str, default=None)
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument("--split-manifest", type=str, default=None,
+                        help="Reuse meta_key membership/order from a prior export manifest CSV.")
     parser.add_argument(
         "--split-strategy", type=str, default=None, choices=["sample_pack", "random"]
     )
     parser.add_argument("--parameter-key", type=str, default=None)
     parser.add_argument("--expected-num-modes", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--synthesis-seed", type=int, default=20020420,
+                        help="Per-sample synthesis randomness, independent of split seed/order.")
     parser.add_argument("--sample-rate", type=int, default=None)
     parser.add_argument(
         "--num-samples",
@@ -615,10 +577,14 @@ def parse_args() -> argparse.Namespace:
         default="recon_bundle",
         help="Directory to save packaged artifacts",
     )
-    parser.add_argument(
-        "--save-target",
-        action="store_true",
-        help="Also save ground-truth target wav files",
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
+        "--save-target", dest="save_target", action="store_true", default=True,
+        help="Save ground-truth WAVs for reproducible evaluation (default).",
+    )
+    target_group.add_argument(
+        "--no-save-target", dest="save_target", action="store_false",
+        help="Skip target WAVs and the evaluation report.",
     )
     parser.add_argument(
         "--max-items",
@@ -694,6 +660,7 @@ def main() -> None:
     if is_temp_cfg:
         _copy_if_exists(model_cfg_to_load, config_root / "resolved_export_config.yaml")
     _copy_if_exists(Path(args.metrics_config), config_root / Path(args.metrics_config).name)
+    _copy_if_exists(Path(args.metrics_config), config_root / "evaluation_metrics.yaml")
 
     ckpt_path = Path(args.ckpt)
     _copy_if_exists(ckpt_path, ckpt_root / ckpt_path.name)
@@ -710,37 +677,46 @@ def main() -> None:
         meta_file=data_args["meta_file"],
         sample_rate=data_args["sample_rate"],
         num_samples=data_args["num_samples"],
-        split=args.split,
+        split=None if args.split_manifest else args.split,
         split_strategy=data_args["split_strategy"],
         parameter_key=data_args["parameter_key"],
         expected_num_modes=data_args["expected_num_modes"],
         audio_dir=data_args["audio_dir"],
         seed=data_args["seed"],
         sample_pack_keys=data_args["sample_pack_keys"],
+        split_train_ratio=data_args["split_train_ratio"],
+        split_val_ratio=data_args["split_val_ratio"],
+        normalize=data_args["normalize"],
+        sample_types=data_args["sample_types"],
+        instruments=data_args["instruments"],
     )
+    if args.split_manifest:
+        with Path(args.split_manifest).open(newline="", encoding="utf-8") as f:
+            keys = [row["meta_key"] for row in csv.DictReader(f)]
+        if len(set(keys)) != len(keys) or not keys:
+            raise ValueError("Split manifest must contain unique, nonempty meta_key IDs.")
+        missing = set(keys) - set(dataset.metadata)
+        if missing:
+            raise ValueError(f"Split manifest IDs are absent from metadata: {sorted(missing)[:5]}")
+        lengths_by_key = dict(zip(dataset.file_list, dataset.lengths))
+        dataset.file_list = [key for key in keys if key in lengths_by_key]
+        dataset.lengths = [lengths_by_key[key] for key in dataset.file_list]
+        _copy_if_exists(Path(args.split_manifest), config_root / "input_split_manifest.csv")
 
     # Instantiate evaluation metrics from YAML.
-    metric_modules: Dict[str, Any] = {}
+    metric_protocol = None
     if not args.no_eval:
-        with open(args.metrics_config, "r", encoding="utf-8") as f:
-            metrics_spec = yaml.safe_load(f)
-        metric_container = _instantiate_from_spec(metrics_spec)
-        if hasattr(metric_container, "items"):
-            metric_modules = dict(metric_container.items())
-        else:
-            raise RuntimeError("metrics-config must instantiate a module dict-like container")
-
-        for m in metric_modules.values():
-            if hasattr(m, "to"):
-                m.to(device)
+        metric_modules, metric_protocol = load_evaluation_metrics(args.metrics_config)
+        metric_modules.to(device)
 
     limit = len(dataset) if args.max_items is None else min(len(dataset), args.max_items)
+    if limit <= 0:
+        raise ValueError("The selected split is empty or max-items is not positive.")
     manifest_path = output_dir / "manifest.csv"
     per_file_loss_path = eval_root / "per_file_loss.csv"
 
     losses = []
-    raw_metric_sums: Dict[str, float] = {}
-    raw_metric_counts: Dict[str, int] = {}
+    metric_rows = []
 
     with manifest_path.open("w", newline="", encoding="utf-8") as manifest_file, per_file_loss_path.open(
         "w", newline="", encoding="utf-8"
@@ -771,35 +747,45 @@ def main() -> None:
                 x = waveform.unsqueeze(0).to(device)
                 p = params.unsqueeze(0).to(device)
                 lengths = torch.tensor([length_i], dtype=torch.long, device=device)
+                sample_seed = int.from_bytes(hashlib.sha256(
+                    f"{args.synthesis_seed}:{meta_key}".encode()).digest()[:8], "big") % (2**63)
+                torch.manual_seed(sample_seed)
                 y_hat = model(x, p, lengths=lengths)
-                loss_value = float(model.loss_fn(y_hat, x).detach().cpu())
+                y_hat, x = y_hat[..., :length_i], x[..., :length_i]
+                loss_kwargs = {"lengths": lengths} if getattr(model, "_loss_accepts_lengths", False) else {}
+                loss_value = float(model.loss_fn(y_hat, x, **loss_kwargs).detach().cpu())
 
             losses.append(loss_value)
 
             # Evaluate additional metrics.
             if not args.no_eval:
-                for name, metric in metric_modules.items():
-                    if isinstance(metric, Metric):
-                        metric.update(y_hat, x)
-                    else:
-                        value = float(metric(y_hat, x).detach().cpu())
-                        raw_metric_sums[name] = raw_metric_sums.get(name, 0.0) + value
-                        raw_metric_counts[name] = raw_metric_counts.get(name, 0) + 1
+                metric_rows.append({
+                    "index": idx, "meta_key": meta_key, "source_filename": str(src_rel),
+                    "length": length_i, "sample_pack_key": dataset.top_level_pack(meta),
+                    "test/objective": loss_value, "test/loss": loss_value,
+                    "metric_version": metric_protocol["version"],
+                    "metric_config_sha256": metric_protocol["config_sha256"],
+                    **score_reconstruction(metric_modules, y_hat, x,
+                                           sample_rate=data_args["sample_rate"]),
+                })
 
-            # ### HIGHLIGHT: Save tensors exactly as used for loss/evaluation (padding included).
+            # Save the same valid-length float32 samples used for evaluation.
             recon = y_hat.squeeze(0).detach().cpu()
             target = x.squeeze(0).detach().cpu()
 
             recon_path = recon_root / src_rel
             recon_path.parent.mkdir(parents=True, exist_ok=True)
-            torchaudio.save(str(recon_path), recon, data_args["sample_rate"])
+            torchaudio.save(str(recon_path), recon, data_args["sample_rate"], encoding="PCM_F", bits_per_sample=32)
 
             target_path_str = ""
             if args.save_target:
                 target_path = target_root / src_rel
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                torchaudio.save(str(target_path), target, data_args["sample_rate"])
+                torchaudio.save(str(target_path), target, data_args["sample_rate"], encoding="PCM_F", bits_per_sample=32)
                 target_path_str = str(target_path)
+
+            if not args.no_eval:
+                metric_rows[-1]["audio_sha256"] = audio_pair_fingerprint(output_dir, src_rel)
 
             manifest_writer.writerow(
                 [
@@ -824,8 +810,17 @@ def main() -> None:
         "audio_dir": data_args["audio_dir"],
         "meta_file": data_args["meta_file"],
         "split": args.split,
+        "split_manifest": args.split_manifest,
         "split_strategy": data_args["split_strategy"],
         "seed": data_args["seed"],
+        "synthesis_seed": args.synthesis_seed,
+        "split_train_ratio": data_args["split_train_ratio"],
+        "split_val_ratio": data_args["split_val_ratio"],
+        "split_policy": "explicit_manifest" if args.split_manifest else "within_top_level_pack_before_filter_v2",
+        "metadata_sha256": hashlib.sha256((Path(data_args["data_dir"]) / data_args["meta_file"]).read_bytes()).hexdigest(),
+        "selected_ids_sha256": hashlib.sha256(json.dumps(dataset.file_list[:limit]).encode()).hexdigest(),
+        "metric_protocol": metric_protocol,
+        "resolved_data": data_args,
         "sample_rate": data_args["sample_rate"],
         "num_samples": data_args["num_samples"],
         "sample_pack_keys": data_args["sample_pack_keys"],
@@ -851,13 +846,13 @@ def main() -> None:
         }
 
     if not args.no_eval:
-        for name, metric in metric_modules.items():
-            if isinstance(metric, Metric):
-                summary["metrics"][f"test/{name}"] = float(metric.compute().detach().cpu())
-            else:
-                c = raw_metric_counts.get(name, 0)
-                if c > 0:
-                    summary["metrics"][f"test/{name}"] = float(raw_metric_sums[name] / c)
+        for key in metric_rows[0]:
+            if key.startswith("test/"):
+                summary["metrics"][key] = statistics.fmean(row[key] for row in metric_rows)
+        with (eval_root / "per_file_metrics.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(metric_rows[0]))
+            writer.writeheader()
+            writer.writerows(metric_rows)
 
     summary_path = eval_root / "summary.json"
     with summary_path.open("w", encoding="utf-8") as f:
@@ -870,6 +865,11 @@ def main() -> None:
         w = csv.writer(f)
         w.writerow(metric_keys)
         w.writerow([summary["metrics"][k] for k in metric_keys])
+
+    if not args.no_eval and args.save_target:
+        from compile_results import main as compile_results
+
+        compile_results([str(output_dir)])
 
     if args.make_tar:
         tar_path = output_dir.with_suffix(".tar.gz")

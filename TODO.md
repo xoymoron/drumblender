@@ -40,8 +40,8 @@ encoder work.
   - DisCodec code/config/script references were removed.
   - Plain DAC encoder behavior was checked against the old DisCodec-era DAC
     implementation; plain noise DAC and transient DAC matched exactly.
-  - `run.sh`, `test_all.sh`, and `test_per_pack.sh` support the current encoder
-    mode strings.
+  - `run.sh` supports the current encoder mode strings. Checkpoint evaluation
+    uses `scripts/export_recon_wavs.py` with optional encoder config overrides.
 
 ## Codec-style encoder compact settings
 

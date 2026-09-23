@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from pytorch_lightning.loggers import WandbLogger
+from drumblender.metrics import score_reconstruction
 
 
 class DrumBlender(pl.LightningModule):
@@ -432,9 +433,16 @@ class DrumBlender(pl.LightningModule):
 
     def test_step(self, batch, batch_idx: int):
         loss, y_hat, target = self._do_step(batch)
-        self.log("test/loss", loss)
+        self.log("test/loss", loss, batch_size=target.shape[0])
         if hasattr(self, "metrics"):
-            for name, metric in self.metrics.items():
-                # ### HIGHLIGHT: Use the masked target (not raw batch[0]) so padded tails do not skew metrics.
-                self.log(f"test/{name}", metric(y_hat, target))
+            lengths = batch[2] if len(batch) == 3 else [target.shape[-1]] * target.shape[0]
+            scores = []
+            for i, length in enumerate(lengths):
+                n = int(length)
+                scores.append(score_reconstruction(
+                    self.metrics, y_hat[i:i+1, :, :n], target[i:i+1, :, :n]))
+            for key in scores[0]:
+                value = sum(row[key] for row in scores) / len(scores)
+                self.log(key, value, batch_size=len(scores), on_step=False,
+                         on_epoch=True, sync_dist=True)
         return loss

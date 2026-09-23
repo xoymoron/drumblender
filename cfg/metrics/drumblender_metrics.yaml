@@ -5,7 +5,7 @@ init_args:
       class_path: drumblender.metrics.LogSpectralDistance
     flux_onset:
       class_path: drumblender.metrics.SpectralFluxOnsetError
-    mss_sc:
+    mr_stft_sc:
       class_path: auraloss.freq.MultiResolutionSTFTLoss
       init_args:
         fft_sizes:
@@ -33,7 +33,7 @@ init_args:
         output: loss
         reduction: mean
         device: null
-    mss_log:
+    mr_stft_log:
       class_path: auraloss.freq.MultiResolutionSTFTLoss
       init_args:
         fft_sizes:
@@ -61,3 +61,30 @@ init_args:
         output: loss
         reduction: mean
         device: null
+    mr_log_mel:
+      class_path: drumblender.metrics.MultiResolutionLogMelDistance
+      init_args:
+        sample_rate: 48000
+        fft_sizes: [512, 2048, 8192]
+        hop_sizes: [128, 512, 2048]
+        n_mels: [40, 80, 128]
+        f_min: 20.0
+        f_max: 20000.0
+        eps: 1.0e-05
+    band_spectral:
+      class_path: drumblender.metrics.BandSpectralErrors
+      init_args:
+        sample_rate: 48000
+        n_fft: 4096
+        hop_size: 256
+        bands:
+        - [low, 20, 250]
+        - [mid, 250, 4000]
+        - [high, 4000, 20000]
+        eps: 1.0e-08
+    log_rms_envelope:
+      class_path: drumblender.metrics.LogRMSEnvelopeError
+      init_args:
+        frame_size: 1024
+        hop_size: 256
+        eps: 1.0e-05

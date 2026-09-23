@@ -380,7 +380,21 @@ class AudioWithParametersDataset(Dataset):
         # Keep deterministic ordering before filtering/splitting.
         self.file_list = sorted(self.metadata.keys())
 
-        # Apply optional metadata filters first.
+        # Split the COMPLETE metadata before filtering. Otherwise a pack-only
+        # evaluation consumes a different RNG sequence and may include train IDs.
+        if split is not None:
+            if split_strategy == "sample_pack":
+                self.file_list = self._split_within_pack(
+                    self.file_list, split, self.split_train_ratio, self.split_val_ratio
+                )
+            elif split_strategy == "random":
+                self.file_list = self._split_random(
+                    self.file_list, split, self.split_train_ratio, self.split_val_ratio
+                )
+            else:
+                raise ValueError("Expected split_strategy 'sample_pack' or 'random'.")
+
+        # Filters select a subset of the already fixed split.
         if sample_types is not None:
             self.file_list = [
                 k
@@ -401,30 +415,8 @@ class AudioWithParametersDataset(Dataset):
             self.file_list = [
                 k
                 for k in self.file_list
-                if self.metadata[k].get("sample_pack_key") in allowed_pack_keys
+                if self.top_level_pack(self.metadata[k]) in allowed_pack_keys
             ]
-
-        # HIGHLIGHT: Train/val/test split is now created at dataset-load time
-        # from sample_pack_key and seed. Preprocessing only needs pack metadata.
-        if split is not None:
-            if split_strategy == "sample_pack":
-                self.file_list = self._split_within_pack(
-                    keys=self.file_list,
-                    split=split,
-                    train_ratio=self.split_train_ratio,
-                    val_ratio=self.split_val_ratio,
-                )
-            elif split_strategy == "random":
-                self.file_list = self._split_random(
-                    keys=self.file_list,
-                    split=split,
-                    train_ratio=self.split_train_ratio,
-                    val_ratio=self.split_val_ratio,
-                )
-            else:
-                raise ValueError(
-                    "Invalid split strategy. Expected one of 'sample_pack' or 'random'."
-                )
 
         # Cache lengths for bucketing.
         self.lengths = []
@@ -444,6 +436,15 @@ class AudioWithParametersDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
+    @staticmethod
+    def top_level_pack(item: dict) -> str:
+        """Group splice/* together, never by a nested vendor/sample-pack folder."""
+        relative = str(item.get("orig_relpath", "")).replace("\\", "/").strip("/")
+        if "/" in relative:
+            return relative.split("/", 1)[0]
+        key = str(item.get("sample_pack_key") or "__root__").replace("\\", "/")
+        return key.strip("/").split("/", 1)[0]
+
     def _split_within_pack(
         self,
         keys: List[str],
@@ -460,7 +461,7 @@ class AudioWithParametersDataset(Dataset):
 
         by_pack = defaultdict(list)
         for key in keys:
-            pack_key = self.metadata[key].get("sample_pack_key", "__root__")
+            pack_key = self.top_level_pack(self.metadata[key])
             by_pack[pack_key].append(key)
 
         g = torch.Generator().manual_seed(self.seed)
