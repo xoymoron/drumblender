@@ -19,7 +19,6 @@ from torch.utils.data import Dataset
 from torch.utils.data import random_split
 
 
-# Setup logging
 logging.basicConfig()
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
@@ -44,8 +43,7 @@ class AudioDataset(Dataset):
         data_dir: Union[str, Path],
         meta_file: str,
         sample_rate: int,
-        # num_samples: int,
-        num_samples: Optional[int], # allow variable length audio - xXx
+        num_samples: Optional[int],
         split: Optional[str] = None,
         seed: int = 42,
         split_strategy: Literal["sample_pack", "random"] = "random",
@@ -89,21 +87,6 @@ class AudioDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
-    # def __getitem__(self, idx) -> Tuple[torch.Tensor]:
-    #     audio_filename = self.metadata[self.file_list[idx]]["filename"]
-    #     waveform, sample_rate = torchaudio.load(self.data_dir.joinpath(audio_filename))
-
-    #     # Confirm sample rate and shape
-    #     assert sample_rate == self.sample_rate, "Sample rate mismatch."
-    #     assert waveform.shape == (1, self.num_samples), "Incorrect input audio shape."
-
-    #     # Apply peak normalization
-    #     if self.normalize:
-    #         waveform = waveform / waveform.abs().max()
-
-    #     return (waveform,)
-
-    ###
     def __getitem__(self, idx) -> Tuple[torch.Tensor]:
         audio_filename = self.metadata[self.file_list[idx]]["filename"]
         waveform, sample_rate = torchaudio.load(self.data_dir.joinpath(audio_filename))
@@ -141,7 +124,6 @@ class AudioDataset(Dataset):
 
         # Return waveform and length for collate/bucketing logic.
         return (waveform, length)
-    ###
 
 
     def _sample_pack_split(
@@ -172,7 +154,6 @@ class AudioDataset(Dataset):
 
         # Count the number of samples in each type (e.g. electric, acoustic)
         data_types = data.groupby("type").size().reset_index(name="counts")
-        # log.info(f"Number of samples by type:\n {data_types}")
 
         # Filter by sample types
         if self.sample_types is not None:
@@ -267,63 +248,6 @@ class AudioDataset(Dataset):
             self.file_list = splits[2]
 
 
-# class AudioWithParametersDataset(AudioDataset):
-#     """
-#     Dataset of audio pairs with an additional parameter tensor
-
-#     Args:
-#         data_dir: Path to the directory containing the dataset.
-#         meta_file: Name of the json metadata file.
-#         sample_rate: Expected sample rate of the audio files.
-#         num_samples: Expected number of samples in the audio files.
-#         parameter_ky: Key in the metadata file for the feature file.
-#         **kwargs: Additional arguments to pass to AudioPairDataset.
-#     """
-
-#     def __init__(
-#         self,
-#         data_dir: Union[str, Path],
-#         meta_file: str,
-#         sample_rate: int,
-#         num_samples: int,
-#         parameter_key: str,
-#         expected_num_modes: Optional[int] = None,
-#         **kwargs,
-#     ):
-#         super().__init__(
-#             data_dir=data_dir,
-#             meta_file=meta_file,
-#             sample_rate=sample_rate,
-#             num_samples=num_samples,
-#             **kwargs,
-#         )
-#         self.parameter_key = parameter_key
-#         self.expected_num_modes = expected_num_modes
-
-#     def __getitem__(self, idx):
-#         (waveform_a,) = super().__getitem__(idx)
-#         feature_file = self.metadata[self.file_list[idx]][self.parameter_key]
-#         feature = torch.load(self.data_dir.joinpath(feature_file))
-
-#         # Pad with zeros if the number of modes is less than expected
-#         if (
-#             self.expected_num_modes is not None
-#             and feature.shape[1] != self.expected_num_modes
-#         ):
-#             null_features = torch.zeros(
-#                 (
-#                     feature.shape[0],
-#                     self.expected_num_modes - feature.shape[1],
-#                     feature.shape[2],
-#                 )
-#             )
-#             feature = torch.cat((feature, null_features), dim=1)
-
-#         return waveform_a, feature
-
-
-
-###
 class AudioWithParametersDataset(Dataset):
     """
     Loads (waveform, params, length).
@@ -596,4 +520,3 @@ class AudioWithParametersDataset(Dataset):
                 )
                 self._audio_fallback_warned = True
         return self.data_dir.joinpath(item["filename"])
-###

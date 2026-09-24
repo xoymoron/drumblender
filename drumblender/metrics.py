@@ -27,7 +27,7 @@ def load_evaluation_metrics(config_path=None):
     path = Path(config_path) if config_path is not None else DEFAULT_METRICS_CONFIG
     spec = yaml.safe_load(path.read_text(encoding="utf-8"))
     modules = spec["init_args"]["modules"]
-    # Old bundles use mss_* names. Preserve their STFT parameters when rescoring.
+    # Preserve the STFT settings in bundles created before the metric rename.
     for old, new in (("mss_sc", "mr_stft_sc"), ("mss_log", "mr_stft_log")):
         if old in modules:
             if new in modules:
@@ -75,7 +75,7 @@ def score_reconstruction(metrics, pred, target, sample_rate=None):
         if sample_rate is not None and expected_rate is not None and sample_rate != expected_rate:
             raise ValueError(f"{name} expects {expected_rate} Hz, received {sample_rate} Hz")
         x, y = pred, target
-        # auraloss uses reflect padding, which needs more than n_fft/2 samples.
+        # Auraloss reflect padding requires more than half an FFT window.
         fft_sizes = getattr(metric, "fft_sizes", None)
         if fft_sizes:
             minimum = max(fft_sizes) // 2 + 1
@@ -106,7 +106,7 @@ def evaluation_score_keys(metrics):
 def audio_pair_fingerprint(bundle_dir, source_filename):
     """Invalidate cached scores if either exported WAV changes (or disappears)."""
     relative = Path(str(source_filename).replace("\\", "/"))
-    if relative.is_absolute() or ".." in relative.parts:
+    if relative.anchor or ".." in relative.parts:
         raise ValueError(f"Unsafe audio path: {source_filename}")
     digest = hashlib.sha256()
     for kind in ("recon", "target"):
@@ -154,7 +154,6 @@ class LogSpectralDistance(Metric):
             hop_length=self.hop_size,
             window=torch.hann_window(self.n_fft, device=x.device),
             return_complex=True,
-            # ### HIGHLIGHT: Use zero padding to avoid reflection artifacts on short clips.
             pad_mode="constant",
         )
         return torch.log(torch.square(torch.abs(X)) + self.eps)
@@ -162,7 +161,6 @@ class LogSpectralDistance(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        # ### HIGHLIGHT: Guard very short clips for large-STFT LSD settings.
         min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
         x = _pad_to_min_length(x, min_len)
         y = _pad_to_min_length(y, min_len)
@@ -172,10 +170,8 @@ class LogSpectralDistance(Metric):
         X = self._log_spectral_power_mag(x)
         Y = self._log_spectral_power_mag(y)
 
-        # Mean of the squared difference along the frequency axis
         lsd = torch.mean(torch.square(X - Y), dim=-2)
 
-        # Mean of the square root over the temporal axis
         lsd = torch.mean(torch.sqrt(lsd), dim=-1)
 
         self.lsd += torch.sum(lsd)
@@ -211,7 +207,6 @@ class MFCCError(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        # ### HIGHLIGHT: Ensure MFCC front-end has enough samples for n_fft.
         min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
         x = _pad_to_min_length(x, min_len)
         y = _pad_to_min_length(y, min_len)
@@ -379,9 +374,7 @@ class SpectralFluxOnsetError(Metric):
             normalized=False,
             onesided=True,
         )
-        # Shier et al., Eq. (3): squared positive differences in TIME.
-        # torch.stft returns [batch, frequency, time]. Keep the printed sum of
-        # squares (no sqrt); the original implementation differentiated frequency.
+        # STFT is [batch, frequency, time]; Eq. (3) differentiates time.
         flux = torch.diff(torch.abs(X), dim=-1)
         flux = (flux + torch.abs(flux)) / 2
         flux = torch.square(flux)
@@ -392,7 +385,6 @@ class SpectralFluxOnsetError(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        # ### HIGHLIGHT: Guard short clips for onset-STFT as well.
         min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
         x = _pad_to_min_length(x, min_len)
         y = _pad_to_min_length(y, min_len)
@@ -400,7 +392,6 @@ class SpectralFluxOnsetError(Metric):
         x = self._onset_signal(x)
         y = self._onset_signal(y)
 
-        # MAE
         onset_error = torch.mean(torch.abs(x - y), dim=-1)
 
         self.error += torch.sum(onset_error)

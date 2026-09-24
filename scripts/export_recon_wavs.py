@@ -4,6 +4,10 @@
 One unfiltered export produces whole-test and top-level-pack reports via
 scripts/compile_results.py. See scripts/evaluation.md for the command and
 output layout. Use --sample-pack-key only to restrict the selected packs.
+
+The bundle keeps paired float WAVs under ``recon/`` and ``target/``. Its
+manifest records sample IDs, relative filenames, and valid audio lengths;
+the evaluation folder contains per-file scores and aggregate reports.
 """
 
 import argparse
@@ -52,38 +56,24 @@ TRANSIENT_ENCODER_BACKBONE_CHOICES = [
 
 
 def _safe_relpath(path_str: str) -> Path:
-    """
-    Normalize a metadata path into a safe relative path (no absolute/root traversal).
-    """
+    """Validate a metadata path before using it as an output filename."""
     rel = Path(path_str.replace("\\", "/"))
-    if rel.is_absolute():
-        # keep filename only for absolute paths
-        return Path(rel.name)
-
-    parts = []
-    for part in rel.parts:
-        if part in ("", ".", ".."):
-            continue
-        parts.append(part)
-    if len(parts) == 0:
-        return Path("unknown.wav")
-    return Path(*parts)
+    if rel.anchor or ".." in rel.parts or not rel.parts or rel == Path("."):
+        raise ValueError(f"Unsafe source filename in metadata: {path_str}")
+    return rel
 
 
 def _export_rel_from_meta(meta: Dict[str, Any]) -> Path:
-    """
-    Prefer original pre-modal path for human-readable filenames.
-    Fallback to processed filename if original path is unavailable.
-    """
-    # ### HIGHLIGHT: build_modal_features.py stores original sample path as `orig_relpath`.
-    if isinstance(meta.get("orig_relpath"), str) and len(meta["orig_relpath"]) > 0:
-        return _safe_relpath(meta["orig_relpath"])
-    if isinstance(meta.get("filename"), str) and len(meta["filename"]) > 0:
-        return _safe_relpath(meta["filename"])
-    return Path("unknown.wav")
+    """Use the original audio path when modal preprocessing recorded it."""
+    for key in ("orig_relpath", "filename"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return _safe_relpath(value)
+    raise ValueError("Metadata must contain orig_relpath or filename")
 
 
 def _optional_int(value: str) -> Optional[int]:
+    """Parse an optional CLI integer, accepting common null spellings."""
     v = value.strip().lower()
     if v in {"none", "null", ""}:
         return None
@@ -91,12 +81,14 @@ def _optional_int(value: str) -> Optional[int]:
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
+    """Copy a file when present and create its destination folder as needed."""
     if src.is_file():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
 
 
 def _copy_path(src: Path, dst: Path) -> None:
+    """Copy one explicitly selected file or preserve a directory's tree."""
     if src.is_file():
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -118,9 +110,7 @@ def _resolve_encoder_cfg(
     backbone: str,
     explicit_cfg: Optional[str],
 ) -> Optional[str]:
-    """
-    Resolve encoder config file path from either an explicit path or a backbone name.
-    """
+    """Resolve an override path; the default backbone keeps the model config."""
     if explicit_cfg is not None and explicit_cfg.strip() != "":
         p = Path(explicit_cfg)
         if not p.is_absolute():
@@ -142,6 +132,7 @@ def _resolve_encoder_cfg(
 
 
 def _resolve_optional_cfg(cfg_dir: Path, cfg_value: Optional[str]) -> Optional[str]:
+    """Resolve an optional config path relative to the model YAML directory."""
     if cfg_value is None or cfg_value.strip() == "":
         return None
     p = Path(cfg_value)
@@ -153,16 +144,13 @@ def _resolve_optional_cfg(cfg_dir: Path, cfg_value: Optional[str]) -> Optional[s
 
 
 def _build_export_model_config(args: argparse.Namespace) -> tuple[Path, bool]:
-    """
-    Optionally write a temporary config that mirrors training-time encoder/synth overrides.
+    """Apply requested architecture overrides without editing the source YAML.
 
-    Returns:
-      (config_path_to_use, is_temp)
+    The returned flag tells ``main`` whether the temporary YAML needs cleanup.
     """
     base_cfg_path = Path(args.config).resolve()
     cfg_dir = base_cfg_path.parent
 
-    # If no overrides are requested, reuse the original config as-is.
     if (
         args.loss_cfg is None
         and args.transient_synth_cfg is None
@@ -217,57 +205,8 @@ def _build_export_model_config(args: argparse.Namespace) -> tuple[Path, bool]:
     return tmp_path, True
 
 
-def _copy_training_context(ckpt_path: Path, package_root: Path) -> None:
-    """
-    Copy nearby training context files from the run directory.
-    """
-    # ### HIGHLIGHT: Infer run directory from ".../checkpoints/<file>.ckpt".
-    run_dir: Optional[Path] = None
-    if ckpt_path.parent.name == "checkpoints":
-        run_dir = ckpt_path.parent.parent
-
-    ctx_dir = package_root / "training_context"
-    ctx_dir.mkdir(parents=True, exist_ok=True)
-
-    # Repository-level scripts/configs often needed to reproduce the run.
-    for repo_file in [
-        Path("run.sh"),
-        Path("run_vessl.sh"),
-        Path("cfg/05_all_parallel.yaml"),
-        Path("cfg/metrics/drumblender_metrics.yaml"),
-    ]:
-        if repo_file.exists():
-            _copy_if_exists(repo_file, ctx_dir / "repo" / repo_file)
-
-    # LightningCLI transient config (if present in current working directory).
-    _copy_if_exists(Path("config.yaml"), ctx_dir / "repo" / "config.yaml")
-
-    if run_dir is None or not run_dir.exists():
-        return
-
-    # Copy useful run-local logs without pulling full checkpoints directory.
-    wanted_patterns = [
-        "metrics.csv",
-        "hparams.yaml",
-        "model-config.yaml",
-        "config.yaml",
-        "*.log",
-        "*.json",
-        "*.jsonl",
-        "events.out.tfevents*",
-    ]
-    for pattern in wanted_patterns:
-        for src in run_dir.rglob(pattern):
-            if not src.is_file():
-                continue
-            # skip checkpoint files; selected ckpt is copied separately
-            if src.suffix == ".ckpt":
-                continue
-            rel = src.relative_to(run_dir)
-            _copy_if_exists(src, ctx_dir / "run_dir" / rel)
-
-
 def _collect_git_info() -> Dict[str, Any]:
+    """Record repository revision and working-tree state when Git is available."""
     info: Dict[str, Any] = {}
     try:
         head = subprocess.check_output(
@@ -288,124 +227,23 @@ def _collect_git_info() -> Dict[str, Any]:
     return info
 
 
-def _copy_run_context_bundle(
-    ckpt_path: Path,
-    package_root: Path,
-    explicit_run_context_json: Optional[str] = None,
-    extra_paths: Optional[list[str]] = None,
-) -> None:
-    """
-    Copy run-context and nearby logs/settings for ckpts saved under ./ckpt.
+def _copy_requested_context(args: argparse.Namespace, output_dir: Path) -> None:
+    """Copy only provenance files explicitly supplied for this evaluation."""
+    if args.run_context_json:
+        source = Path(args.run_context_json).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"Run context not found: {source}")
+        _copy_if_exists(source, output_dir / "training_context" / "run_context" / source.name)
 
-    This complements `_copy_training_context` (which is best when ckpt lives under
-    .../checkpoints/ in a Lightning run dir).
-    """
-    ctx_root = package_root / "training_context"
-    run_ctx_dir = ctx_root / "run_context"
-    refs_dir = ctx_root / "referenced_configs"
-    logs_dir = ctx_root / "logs"
-    extra_dir = ctx_root / "extra"
-    run_ctx_dir.mkdir(parents=True, exist_ok=True)
-    refs_dir.mkdir(parents=True, exist_ok=True)
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    extra_dir.mkdir(parents=True, exist_ok=True)
-
-    selected: list[Path] = []
-
-    # Explicit run-context JSON (if provided)
-    if explicit_run_context_json is not None and explicit_run_context_json.strip() != "":
-        p = Path(explicit_run_context_json)
-        if not p.is_absolute():
-            p = Path.cwd() / p
-        if p.is_file():
-            dst = run_ctx_dir / "run-context.explicit.json"
-            _copy_if_exists(p, dst)
-            selected.append(dst)
-
-    # Auto-pick nearby run-context files under ckpt directory.
-    ckpt_parent = ckpt_path.parent
-    candidates = sorted(ckpt_parent.glob("run-context-*.json"))
-    if len(candidates) > 0:
-        ckpt_mtime = ckpt_path.stat().st_mtime if ckpt_path.is_file() else 0.0
-        nearest = min(candidates, key=lambda p: abs(p.stat().st_mtime - ckpt_mtime))
-        latest = max(candidates, key=lambda p: p.stat().st_mtime)
-        auto_pick = [nearest]
-        if latest != nearest:
-            auto_pick.append(latest)
-
-        for p in auto_pick:
-            dst = run_ctx_dir / p.name
-            _copy_if_exists(p, dst)
-            selected.append(dst)
-
-        with (run_ctx_dir / "auto_candidates.txt").open("w", encoding="utf-8") as f:
-            for p in candidates:
-                f.write(str(p) + "\n")
-
-    # Parse selected context files and copy referenced config files.
-    referenced_keys = [
-        "cfg",
-        "loss_cfg",
-        "noise_encoder_cfg",
-        "transient_encoder_cfg",
-        "transient_synth_cfg",
-    ]
-    for ctx_path in selected:
-        try:
-            with ctx_path.open("r", encoding="utf-8") as f:
-                obj = json.load(f)
-        except Exception:
-            continue
-
-        launch_cmd = obj.get("launch_cmd")
-        if isinstance(launch_cmd, str) and len(launch_cmd) > 0:
-            txt_path = run_ctx_dir / f"{ctx_path.stem}.launch_cmd.txt"
-            txt_path.write_text(launch_cmd + "\n", encoding="utf-8")
-
-        script_name = obj.get("script")
-        if isinstance(script_name, str) and len(script_name) > 0:
-            sp = Path(script_name)
-            if not sp.is_absolute():
-                sp = Path.cwd() / sp
-            if sp.is_file():
-                _copy_if_exists(sp, refs_dir / sp.name)
-
-        for k in referenced_keys:
-            v = obj.get(k)
-            if not isinstance(v, str) or len(v.strip()) == 0:
-                continue
-            p = Path(v)
-            if not p.is_absolute():
-                p = Path.cwd() / p
-            if p.is_file():
-                _copy_if_exists(p, refs_dir / p.name)
-
-    # Copy nearest .log file in ./logs by modification time.
-    repo_logs = Path("logs")
-    if repo_logs.exists():
-        log_files = [p for p in repo_logs.rglob("*.log") if p.is_file()]
-        if len(log_files) > 0:
-            ckpt_mtime = ckpt_path.stat().st_mtime if ckpt_path.is_file() else 0.0
-            nearest_log = min(log_files, key=lambda p: abs(p.stat().st_mtime - ckpt_mtime))
-            _copy_if_exists(nearest_log, logs_dir / nearest_log.name)
-
-    # User-provided extra files/dirs.
-    if extra_paths is not None:
-        for item in extra_paths:
-            if item is None:
-                continue
-            s = str(item).strip()
-            if s == "":
-                continue
-            p = Path(s)
-            if not p.is_absolute():
-                p = Path.cwd() / p
-            if not p.exists():
-                continue
-            _copy_path(p, extra_dir / p.name)
+    for value in args.extra_path:
+        source = Path(value).expanduser().resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"Extra path not found: {source}")
+        _copy_path(source, output_dir / "training_context" / "extra" / source.name)
 
 
 def _load_data_config_args(data_config_path: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Read datamodule settings separately from dataset-specific options."""
     cfg_path = Path(data_config_path)
     with cfg_path.open("r", encoding="utf-8") as f:
         cfg_obj = yaml.safe_load(f)
@@ -427,6 +265,7 @@ def _load_data_config_args(data_config_path: str) -> tuple[Dict[str, Any], Dict[
 
 
 def _resolve_data_args(args: argparse.Namespace) -> Dict[str, Any]:
+    """Merge CLI overrides with the model's data YAML and dataset defaults."""
     init_args: Dict[str, Any] = {}
     dataset_kwargs: Dict[str, Any] = {}
     if args.data_config is not None:
@@ -496,7 +335,10 @@ def _resolve_data_args(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    """Define checkpoint, split, metric, and output options for one export."""
+    parser = argparse.ArgumentParser(
+        description="Reconstruct a dataset split from a checkpoint and evaluate the audio pairs."
+    )
     parser.add_argument("--config", type=str, required=True, help="Model config YAML")
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint path")
     parser.add_argument(
@@ -630,9 +472,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Resolve the model config and always remove it if it was temporary."""
     args = parse_args()
+    model_cfg_to_load, is_temp_cfg = _build_export_model_config(args)
+    try:
+        _run_export(args, model_cfg_to_load, is_temp_cfg)
+    finally:
+        if is_temp_cfg:
+            model_cfg_to_load.unlink(missing_ok=True)
+
+
+def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: bool) -> None:
+    """Export reconstructions, per-file scores, provenance, and reports."""
     data_args = _resolve_data_args(args)
 
+    # Keep each artifact type in its own folder so the bundle can be rescored later.
     output_dir = Path(args.output_dir)
     recon_root = output_dir / "recon"
     target_root = output_dir / "target"
@@ -646,32 +500,26 @@ def main() -> None:
     if args.save_target:
         target_root.mkdir(parents=True, exist_ok=True)
 
+    # Fall back to CPU when CUDA was requested but is unavailable.
     device = "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
 
-    model_cfg_to_load, is_temp_cfg = _build_export_model_config(args)
     model, _ = load_model(str(model_cfg_to_load), args.ckpt, include_data=False)
     model = model.to(device)
     model.eval()
 
-    # ### HIGHLIGHT: Keep a copy of configs used for this export.
+    # Save the exact checkpoint and resolved YAML used for this reconstruction.
     _copy_if_exists(Path(args.config), config_root / Path(args.config).name)
     if args.data_config is not None:
         _copy_if_exists(Path(args.data_config), config_root / Path(args.data_config).name)
     if is_temp_cfg:
         _copy_if_exists(model_cfg_to_load, config_root / "resolved_export_config.yaml")
-    _copy_if_exists(Path(args.metrics_config), config_root / Path(args.metrics_config).name)
     _copy_if_exists(Path(args.metrics_config), config_root / "evaluation_metrics.yaml")
 
     ckpt_path = Path(args.ckpt)
     _copy_if_exists(ckpt_path, ckpt_root / ckpt_path.name)
-    _copy_training_context(ckpt_path, output_dir)
-    _copy_run_context_bundle(
-        ckpt_path=ckpt_path,
-        package_root=output_dir,
-        explicit_run_context_json=args.run_context_json,
-        extra_paths=args.extra_path,
-    )
+    _copy_requested_context(args, output_dir)
 
+    # Reuse manifest membership and order when the caller supplies one.
     dataset = AudioWithParametersDataset(
         data_dir=data_args["data_dir"],
         meta_file=data_args["meta_file"],
@@ -699,13 +547,14 @@ def main() -> None:
         if missing:
             raise ValueError(f"Split manifest IDs are absent from metadata: {sorted(missing)[:5]}")
         lengths_by_key = dict(zip(dataset.file_list, dataset.lengths))
+        # Rebuild cached lengths in manifest order after applying dataset filters.
         dataset.file_list = [key for key in keys if key in lengths_by_key]
         dataset.lengths = [lengths_by_key[key] for key in dataset.file_list]
         _copy_if_exists(Path(args.split_manifest), config_root / "input_split_manifest.csv")
 
-    # Instantiate evaluation metrics from YAML.
     metric_protocol = None
     if not args.no_eval:
+        # These are independent test metrics; the checkpoint's loss remains separate.
         metric_modules, metric_protocol = load_evaluation_metrics(args.metrics_config)
         metric_modules.to(device)
 
@@ -717,6 +566,7 @@ def main() -> None:
 
     losses = []
     metric_rows = []
+    exported_paths = set()
 
     with manifest_path.open("w", newline="", encoding="utf-8") as manifest_file, per_file_loss_path.open(
         "w", newline="", encoding="utf-8"
@@ -735,10 +585,14 @@ def main() -> None:
         )
         loss_writer.writerow(["index", "meta_key", "source_filename", "length", "test/loss"])
 
+        # Use batch size one so each sample keeps its own valid length and random seed.
         for idx in tqdm(range(limit), desc="export"):
             meta_key = dataset.file_list[idx]
             meta = dataset.metadata[meta_key]
             src_rel = _export_rel_from_meta(meta)
+            if src_rel in exported_paths:
+                raise ValueError(f"Duplicate output WAV path in metadata: {src_rel}")
+            exported_paths.add(src_rel)
 
             waveform, params, length = dataset[idx]
             length_i = int(length)
@@ -747,18 +601,21 @@ def main() -> None:
                 x = waveform.unsqueeze(0).to(device)
                 p = params.unsqueeze(0).to(device)
                 lengths = torch.tensor([length_i], dtype=torch.long, device=device)
+                # Key the synthesis RNG by sample ID so filtering or reordering cannot
+                # change the reconstruction noise for samples that appear in both runs.
                 sample_seed = int.from_bytes(hashlib.sha256(
                     f"{args.synthesis_seed}:{meta_key}".encode()).digest()[:8], "big") % (2**63)
                 torch.manual_seed(sample_seed)
                 y_hat = model(x, p, lengths=lengths)
                 y_hat, x = y_hat[..., :length_i], x[..., :length_i]
+                # This is the checkpoint's training objective; test metrics are computed below.
                 loss_kwargs = {"lengths": lengths} if getattr(model, "_loss_accepts_lengths", False) else {}
                 loss_value = float(model.loss_fn(y_hat, x, **loss_kwargs).detach().cpu())
 
             losses.append(loss_value)
 
-            # Evaluate additional metrics.
             if not args.no_eval:
+                # Metric rows include enough identity and protocol data to reject stale caches.
                 metric_rows.append({
                     "index": idx, "meta_key": meta_key, "source_filename": str(src_rel),
                     "length": length_i, "sample_pack_key": dataset.top_level_pack(meta),
@@ -769,7 +626,7 @@ def main() -> None:
                                            sample_rate=data_args["sample_rate"]),
                 })
 
-            # Save the same valid-length float32 samples used for evaluation.
+            # Persist exactly the unpadded samples used for scoring.
             recon = y_hat.squeeze(0).detach().cpu()
             target = x.squeeze(0).detach().cpu()
 
@@ -799,7 +656,6 @@ def main() -> None:
             )
             loss_writer.writerow([idx, meta_key, str(src_rel), length_i, loss_value])
 
-    # Build summary metrics payload.
     summary = {
         "export_time_utc": datetime.now(timezone.utc).isoformat(),
         "config": args.config,
@@ -816,7 +672,9 @@ def main() -> None:
         "synthesis_seed": args.synthesis_seed,
         "split_train_ratio": data_args["split_train_ratio"],
         "split_val_ratio": data_args["split_val_ratio"],
+        # Record the policy so results can be compared only with matching split membership.
         "split_policy": "explicit_manifest" if args.split_manifest else "within_top_level_pack_before_filter_v2",
+        # Hash both source metadata and selected IDs so test membership is auditable.
         "metadata_sha256": hashlib.sha256((Path(data_args["data_dir"]) / data_args["meta_file"]).read_bytes()).hexdigest(),
         "selected_ids_sha256": hashlib.sha256(json.dumps(dataset.file_list[:limit]).encode()).hexdigest(),
         "metric_protocol": metric_protocol,
@@ -833,7 +691,6 @@ def main() -> None:
         summary["metrics"]["test/loss"] = float(sum(losses) / len(losses))
         loss_std = 0.0
         if len(losses) > 1:
-            # ### HIGHLIGHT: Report population std over per-file test/loss values.
             loss_std = float(statistics.pstdev(losses))
         summary["loss_stats"] = {
             "mean": float(statistics.fmean(losses)),
@@ -858,7 +715,6 @@ def main() -> None:
     with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    # Also write a CSV one-liner for easy spreadsheet loading.
     summary_csv_path = eval_root / "summary_metrics.csv"
     metric_keys = sorted(summary["metrics"].keys())
     with summary_csv_path.open("w", newline="", encoding="utf-8") as f:
@@ -867,6 +723,7 @@ def main() -> None:
         w.writerow([summary["metrics"][k] for k in metric_keys])
 
     if not args.no_eval and args.save_target:
+        # The compiler adds pack-level statistics and visual reports to this bundle.
         from compile_results import main as compile_results
 
         compile_results([str(output_dir)])
@@ -876,12 +733,6 @@ def main() -> None:
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(output_dir, arcname=output_dir.name)
         print(f"[OK] archive: {tar_path}")
-
-    if is_temp_cfg:
-        try:
-            Path(model_cfg_to_load).unlink(missing_ok=True)
-        except Exception:
-            pass
 
     print(f"[OK] exported {limit} items to {output_dir}")
     print(f"[OK] manifest: {manifest_path}")

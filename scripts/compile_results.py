@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import math
-import html
 import statistics
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -34,10 +34,21 @@ except Exception:
     sf = None
 
 
+# Number of examples shown in each best/worst report section.
 TOP_K = 3
+# Shared SVG dimensions keep all metric distribution panels aligned.
+PLOT_VIEW_WIDTH = 920
+PLOT_LEFT = 260
+PLOT_SPAN = 600
+PLOT_ROW_HEIGHT = 44
+PLOT_FIRST_ROW = 48
+PLOT_BASE_HEIGHT = 60
+PLOT_GRID_INTERVALS = 4
 RANK_METRICS = [
+    # Keep the paper table and ranking focused on these three primary metrics.
     ("MR-STFT", "test/mr_stft"),
     ("LSD", "test/lsd"),
+    # Retain the CSV key for compatibility; it now stores temporal spectral flux.
     ("SF", "test/flux_onset"),
 ]
 SUMMARY_HEADERS = [
@@ -54,6 +65,7 @@ SUMMARY_HEADERS = [
 
 
 def _to_float(value: object) -> float:
+    """Convert CSV values consistently; invalid cells become non-finite."""
     try:
         return float(value)  # type: ignore[arg-type]
     except Exception:
@@ -65,6 +77,7 @@ def _is_finite(value: float) -> bool:
 
 
 def _mean_std(values: Iterable[float]) -> Tuple[float, float]:
+    """Return the per-file mean and population standard deviation."""
     xs = [x for x in values if _is_finite(x)]
     if len(xs) == 0:
         return float("nan"), float("nan")
@@ -74,6 +87,7 @@ def _mean_std(values: Iterable[float]) -> Tuple[float, float]:
 
 
 def _fmt_float(value: float, digits: int = 6) -> str:
+    """Format finite values and make missing values explicit in reports."""
     if not _is_finite(value):
         return "N/A"
     return f"{value:.{digits}f}"
@@ -85,6 +99,7 @@ def _escape_cell(value: object) -> str:
 
 
 def _markdown_table(headers: List[str], rows: List[List[object]]) -> str:
+    """Render the small text tables used by summaries and extremes reports."""
     header_line = "| " + " | ".join(_escape_cell(h) for h in headers) + " |"
     sep_line = "| " + " | ".join("---" for _ in headers) + " |"
     body_lines = [
@@ -95,6 +110,7 @@ def _markdown_table(headers: List[str], rows: List[List[object]]) -> str:
 
 
 def _latex_escape(value: object) -> str:
+    """Escape path and pack names before inserting them into TeX cells."""
     text = str(value)
     replacements = {
         "\\": r"\textbackslash{}",
@@ -123,6 +139,7 @@ def _write_csv(path: Path, rows: List[Dict[str, object]], headers: List[str]) ->
 
 
 def _bundle_dirs(root: Path) -> List[Path]:
+    """Accept one bundle directly or find bundles below a run directory."""
     direct_summary = root / "evaluation" / "summary.json"
     if direct_summary.is_file():
         return [root]
@@ -155,6 +172,7 @@ def _safe_report_name(relpath: str) -> str:
 
 
 def _load_audio_mono(path: Path) -> Tuple[torch.Tensor, int]:
+    """Read the first channel, preferring torchaudio and falling back to SoundFile."""
     if torchaudio is not None:
         try:
             waveform, sr = torchaudio.load(str(path))
@@ -181,6 +199,7 @@ def _sample_name(row: Dict[str, object]) -> str:
 
 
 def _metric_config(bundle_dir: Path):
+    """Find the metric YAML copied into an exported bundle."""
     for name in ("evaluation_metrics.yaml", "drumblender_metrics.yaml"):
         path = bundle_dir / "configs" / name
         if path.is_file():
@@ -188,9 +207,8 @@ def _metric_config(bundle_dir: Path):
     return None
 
 
-def _compute_metric_rows(bundle_dir, loss_rows, metrics=None, protocol=None):
-    if metrics is None:
-        metrics, protocol = load_evaluation_metrics(_metric_config(bundle_dir))
+def _compute_metric_rows(bundle_dir, loss_rows, metrics, protocol):
+    """Rescore paired WAVs and refresh the per-file cache for this bundle."""
     metric_rows = []
     for i, source in enumerate(loss_rows):
         src_rel = str(source.get("source_filename", "")).replace("\\", "/")
@@ -206,7 +224,7 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics=None, protocol=None):
         length = int(source.get("length") or target.shape[-1])
         if not 0 < length <= target.shape[-1]:
             raise ValueError(f"Invalid manifest length: {src_rel}")
-        # A legacy bundle may contain right padding. Exclude it identically to export.
+        # Older bundles may contain right padding; score only the recorded valid length.
         scores = score_reconstruction(metrics, recon[None, :, :length],
                                       target[None, :, :length], sample_rate=sr_t)
         row = dict(source)
@@ -224,38 +242,53 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics=None, protocol=None):
 
 
 def _row_pack(row):
+    """Group by the first path component, matching the dataset's top-level packs."""
     source = str(row.get("source_filename", "")).replace("\\", "/")
     if "/" in source:
         return source.split("/", 1)[0]
     return str(row.get("sample_pack_key") or "__root__").replace("\\", "/").split("/", 1)[0]
 
 
-def _load_or_compute_metric_rows(bundle_dir: Path, recompute=False):
+def _cache_matches(bundle_dir, rows, loss_rows, metrics, protocol):
+    """Reuse scores only when sample order, metric setup, and both WAVs still match."""
+    if not rows or len(rows) != len(loss_rows):
+        return False
+
+    required_scores = evaluation_score_keys(metrics)
+    for row, source in zip(rows, loss_rows):
+        # Reject changes in sample order, metric setup, scores, or paired WAV content.
+        if any(row.get(key) != source.get(key)
+               for key in ("meta_key", "source_filename", "length")):
+            return False
+        if row.get("metric_version") != protocol["version"]:
+            return False
+        if row.get("metric_config_sha256") != protocol["config_sha256"]:
+            return False
+        if any(not _is_finite(_to_float(row.get(key))) for key in required_scores):
+            return False
+        if row.get("audio_sha256") != audio_pair_fingerprint(
+            bundle_dir, source["source_filename"]
+        ):
+            return False
+    return True
+
+
+def _load_or_compute_metric_rows(bundle_dir: Path, metrics, protocol, recompute=False):
+    """Load a valid cache or rescore the paired audio when it is stale or forced."""
     loss_csv = bundle_dir / "evaluation" / "per_file_loss.csv"
     if not loss_csv.is_file():
         raise FileNotFoundError(f"Missing per_file_loss.csv: {loss_csv}")
     loss_rows = _read_csv(loss_csv)
-    metrics, protocol = load_evaluation_metrics(_metric_config(bundle_dir))
     cache = bundle_dir / "evaluation" / "per_file_metrics.csv"
     if cache.is_file() and not recompute:
         rows = _read_csv(cache)
-        required = evaluation_score_keys(metrics)
-        valid = bool(rows) and len(rows) == len(loss_rows)
-        for row, source in zip(rows, loss_rows):
-            valid = valid and all(str(row.get(k)) == str(source.get(k))
-                                  for k in ("meta_key", "source_filename", "length"))
-            valid = valid and row.get("metric_version") == protocol["version"]
-            valid = valid and row.get("metric_config_sha256") == protocol["config_sha256"]
-            valid = valid and all(_is_finite(_to_float(row.get(k))) for k in required)
-            valid = valid and row.get("audio_sha256") == audio_pair_fingerprint(bundle_dir, source["source_filename"])
-            if not valid:
-                break
-        if valid:
+        if _cache_matches(bundle_dir, rows, loss_rows, metrics, protocol):
             return rows
     return _compute_metric_rows(bundle_dir, loss_rows, metrics, protocol)
 
 
 def _pack_label(summary: Dict[str, Any]) -> str:
+    """Label filtered exports by their requested packs, or mark them as all packs."""
     keys = summary.get("sample_pack_keys")
     if isinstance(keys, list) and len(keys) > 0:
         return ",".join(str(k) for k in keys)
@@ -269,6 +302,7 @@ def _summary_row(
     rows: List[Dict[str, object]],
     pack_override: Optional[str] = None,
 ) -> Dict[str, object]:
+    """Summarize the three primary metrics for one bundle or pack subset."""
     mr_stft_mean, mr_stft_std = _mean_std(_to_float(r.get("test/mr_stft")) for r in rows)
     lsd_mean, lsd_std = _mean_std(_to_float(r.get("test/lsd")) for r in rows)
     sf_mean, sf_std = _mean_std(_to_float(r.get("test/flux_onset")) for r in rows)
@@ -286,6 +320,7 @@ def _summary_row(
 
 
 def _summary_markdown(summary_rows: List[Dict[str, object]]) -> str:
+    """Render the primary per-bundle scores as a Markdown table."""
     rows = [
         [
             row["bundle"],
@@ -304,6 +339,7 @@ def _summary_markdown(summary_rows: List[Dict[str, object]]) -> str:
 
 
 def _summary_latex(summary_rows: List[Dict[str, object]]) -> str:
+    """Build the compact paper table; supplementary metrics stay in the reports."""
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
@@ -337,6 +373,7 @@ def _summary_latex(summary_rows: List[Dict[str, object]]) -> str:
 
 
 def _extreme_table_rows(selected: List[Tuple[Dict[str, object], float]]) -> List[List[object]]:
+    """Format ranked samples with their pack, filename, and metric values."""
     rows: List[List[object]] = []
     for rank, (row, _) in enumerate(selected, start=1):
         rows.append(
@@ -358,6 +395,7 @@ def _write_bundle_extremes(
     summary: Dict[str, Any],
     rows: List[Dict[str, object]],
 ) -> str:
+    """List the best and worst examples for each primary metric."""
     relpath = _bundle_relpath(root, bundle_dir)
     safe_name = _safe_report_name(relpath)
     out_path = report_dir / f"extremes_{safe_name}.txt"
@@ -396,21 +434,29 @@ def _write_bundle_extremes(
     return out_path.name
 
 
-def _percentile(values, q):
-    values = sorted(values)
-    position = (len(values) - 1) * q
-    lo, hi = math.floor(position), math.ceil(position)
-    return values[lo] + (values[hi] - values[lo]) * (position - lo)
+def _percentiles(values, probabilities):
+    """Interpolate quantiles on one sorted copy of the values."""
+    ordered = sorted(values)
+    result = []
+    for probability in probabilities:
+        position = (len(ordered) - 1) * probability
+        lower, upper = math.floor(position), math.ceil(position)
+        result.append(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
+    return result
 
 
 def _group_rows(rows):
-    groups = {"all samples": rows}
-    for pack in sorted({_row_pack(row) for row in rows}):
-        groups[f"pack: {pack}"] = [row for row in rows if _row_pack(row) == pack]
-    return groups
+    """Create an overall group plus overlapping subsets for each top-level pack."""
+    by_pack = {}
+    for row in rows:
+        by_pack.setdefault(_row_pack(row), []).append(row)
+    return {"all samples": rows, **{
+        f"pack: {pack}": by_pack[pack] for pack in sorted(by_pack)
+    }}
 
 
 def _distribution_stats(bundle, rows):
+    """Report distribution summaries for every saved score, overall and per pack."""
     result = []
     primary = {column for _, column in RANK_METRICS}
     extra = sorted(key for key in rows[0]
@@ -422,22 +468,22 @@ def _distribution_stats(bundle, rows):
             values = [_to_float(row[column]) for row in examples]
             if not values or not all(map(math.isfinite, values)):
                 raise ValueError(f"Invalid {label} scores in {bundle}/{group}")
+            # SEM and quantiles complement the per-file mean and population spread.
             mean, std = _mean_std(values)
+            p05, p25, median, p75, p95, p99 = _percentiles(
+                values, (.05, .25, .5, .75, .95, .99)
+            )
             result.append({"bundle": bundle, "group": group, "metric": label,
                            "n": len(values), "mean": mean, "std": std,
                            "sem": std / math.sqrt(len(values)),
-                           "p05": _percentile(values, .05),
-                           "p25": _percentile(values, .25),
-                           "median": _percentile(values, .5),
-                           "p75": _percentile(values, .75),
-                           "p95": _percentile(values, .95),
-                           "p99": _percentile(values, .99),
+                           "p05": p05, "p25": p25, "median": median,
+                           "p75": p75, "p95": p95, "p99": p99,
                            "min": min(values), "max": max(values)})
     return result
 
 
 def _write_dashboard(path, bundles):
-    """Standalone SVG/HTML distribution plots, with no plotting dependency."""
+    """Write self-contained SVG plots; supplemental metrics are collapsed by default."""
     parts = ['<!doctype html><html lang="en"><meta charset="utf-8">',
              '<title>Reconstruction evaluation</title><style>',
              'body{font:16px system-ui;max-width:1100px;margin:40px auto;padding:20px;color:#172337}',
@@ -461,19 +507,22 @@ def _write_dashboard(path, bundles):
             if is_secondary:
                 parts.append(f'<details><summary>{html.escape(label)}</summary>')
             arrays = [[float(row[column]) for row in examples] for examples in groups.values()]
+            # SF is long-tailed, so log1p keeps the rest of its distribution visible.
             transform = math.log1p if label == "SF" else float
             upper = max(transform(max(values)) for values in arrays) or 1.0
-            scale = lambda value: 260 + 600 * transform(value) / upper
-            height = 60 + len(groups) * 44
-            parts.append(f'<h3>{label}</h3><svg role="img" aria-label="{label} distributions" viewBox="0 0 920 {height}">')
-            for tick in range(5):
-                value = upper * tick / 4
+            scale = lambda value: PLOT_LEFT + PLOT_SPAN * transform(value) / upper
+            height = PLOT_BASE_HEIGHT + len(groups) * PLOT_ROW_HEIGHT
+            parts.append(f'<h3>{label}</h3><svg role="img" aria-label="{label} distributions" viewBox="0 0 {PLOT_VIEW_WIDTH} {height}">')
+            for tick in range(PLOT_GRID_INTERVALS + 1):
+                value = upper * tick / PLOT_GRID_INTERVALS
                 raw = math.expm1(value) if label == "SF" else value
-                x = 260 + 150 * tick
+                x = PLOT_LEFT + (PLOT_SPAN // PLOT_GRID_INTERVALS) * tick
                 parts.append(f'<path d="M{x} 28 V{height-24}" stroke="#dce2eb"/><text x="{x}" y="18" text-anchor="middle">{raw:.3g}</text>')
             for i, ((group, examples), values) in enumerate(zip(groups.items(), arrays)):
-                y = 48 + i * 44
-                p5, p25, p50, p75, p95 = [scale(_percentile(values, q)) for q in (.05, .25, .5, .75, .95)]
+                y = PLOT_FIRST_ROW + i * PLOT_ROW_HEIGHT
+                p5, p25, p50, p75, p95 = [
+                    scale(value) for value in _percentiles(values, (.05, .25, .5, .75, .95))
+                ]
                 mean = scale(statistics.fmean(values))
                 parts.append(f'<text x="12" y="{y+4}">{html.escape(group)} (n={len(examples)})</text>')
                 parts.append(f'<path d="M{p5} {y} H{p95} M{p5} {y-6} V{y+6} M{p95} {y-6} V{y+6}" stroke="#426b9a"/>')
@@ -486,7 +535,39 @@ def _write_dashboard(path, bundles):
     path.write_text("\n".join(parts), encoding="utf-8")
 
 
+def _update_bundle_summary(bundle_dir, summary, metric_rows):
+    """Refresh current summary scores while preserving metrics from older protocols."""
+    current_version = metric_rows[0]["metric_version"]
+    if (summary.get("metric_protocol") or {}).get("version") != current_version:
+        summary.setdefault("legacy_metrics", summary.get("metrics", {}).copy())
+        for old_key in ("test/mss", "test/mss_sc", "test/mss_log"):
+            summary.setdefault("metrics", {}).pop(old_key, None)
+
+    summary["metric_protocol"] = {
+        "version": current_version,
+        "config_sha256": metric_rows[0]["metric_config_sha256"],
+    }
+    current_metrics = summary.setdefault("metrics", {})
+    for key in metric_rows[0]:
+        if key.startswith("test/") and key not in ("test/loss", "test/objective"):
+            current_metrics[key] = statistics.fmean(float(row[key]) for row in metric_rows)
+
+    eval_dir = bundle_dir / "evaluation"
+    (eval_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    _write_csv(eval_dir / "summary_metrics.csv", [current_metrics], sorted(current_metrics))
+
+
+def _write_bundle_statistics(bundle_dir, bundle_name, metric_rows):
+    """Save the full per-metric distributions beside the per-file scores."""
+    stats = _distribution_stats(bundle_name, metric_rows)
+    eval_dir = bundle_dir / "evaluation"
+    _write_csv(eval_dir / "statistics.csv", stats, list(stats[0]))
+    (eval_dir / "statistics.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
+    return stats
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    """Compile per-bundle caches into statistics, tables, extremes, and plots."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=str, help="Run directory or one exported bundle directory")
     parser.add_argument(
@@ -507,13 +588,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     root = Path(args.root).resolve()
     bundle_dirs = _bundle_dirs(root)
     bundle_dirs = sorted(bundle_dirs, key=lambda p: _bundle_relpath(root, p))
-    protocols = {
-        load_evaluation_metrics(_metric_config(bundle))[1]["config_sha256"]
+    configured_bundles = [
+        (bundle, *load_evaluation_metrics(_metric_config(bundle)))
         for bundle in bundle_dirs
-    }
-    if len(protocols) != 1:
+    ]
+    # Comparisons are valid only when every bundle uses the same metric protocol.
+    if len({protocol["config_sha256"] for _, _, protocol in configured_bundles}) != 1:
         raise ValueError("Cannot combine runs using different evaluation metric configurations")
 
+    # Keep a single bundle's reports beside it; combine run reports at the root.
     if args.report_dir is not None:
         report_dir = Path(args.report_dir).resolve()
     elif len(bundle_dirs) == 1 and bundle_dirs[0] == root:
@@ -528,30 +611,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     plot_bundles = []
     pack_macro = []
 
-    for bundle_dir in bundle_dirs:
+        # Validate caches and summarize each bundle before writing combined reports.
+    for bundle_dir, metrics, protocol in configured_bundles:
         summary_path = bundle_dir / "evaluation" / "summary.json"
         with summary_path.open("r", encoding="utf-8") as f:
             summary = json.load(f)
 
-        metric_rows = _load_or_compute_metric_rows(bundle_dir, recompute=args.recompute)
-        if (summary.get("metric_protocol") or {}).get("version") != metric_rows[0]["metric_version"]:
-            summary.setdefault("legacy_metrics", summary.get("metrics", {}).copy())
-            for old_key in ("test/mss", "test/mss_sc", "test/mss_log"):
-                summary.setdefault("metrics", {}).pop(old_key, None)
-        summary["metric_protocol"] = {"version": metric_rows[0]["metric_version"],
-                                      "config_sha256": metric_rows[0]["metric_config_sha256"]}
-        current_metrics = summary.setdefault("metrics", {})
-        for column in metric_rows[0]:
-            if column.startswith("test/") and column not in ("test/loss", "test/objective"):
-                current_metrics[column] = statistics.fmean(float(row[column]) for row in metric_rows)
-        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-        _write_csv(bundle_dir / "evaluation" / "summary_metrics.csv", [current_metrics], sorted(current_metrics))
-        relpath = _bundle_relpath(root, bundle_dir)
-        stats = _distribution_stats(relpath, metric_rows)
-        _write_csv(bundle_dir / "evaluation" / "statistics.csv", stats, list(stats[0]))
-        (bundle_dir / "evaluation" / "statistics.json").write_text(
-            json.dumps(stats, indent=2) + "\n", encoding="utf-8"
+        metric_rows = _load_or_compute_metric_rows(
+            bundle_dir, metrics, protocol, recompute=args.recompute
         )
+        _update_bundle_summary(bundle_dir, summary, metric_rows)
+        relpath = _bundle_relpath(root, bundle_dir)
+        stats = _write_bundle_statistics(bundle_dir, relpath, metric_rows)
         distributions.extend(stats)
         plot_bundles.append((relpath, metric_rows))
         for label in sorted({r["metric"] for r in stats}):
@@ -559,11 +630,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             pack_macro.append({"bundle": relpath, "metric": label, "packs": len(pack_stats),
                                "mean_of_pack_means": statistics.fmean(r["mean"] for r in pack_stats)})
         summary_rows.append(_summary_row(root, bundle_dir, summary, metric_rows))
-        pack_names = sorted({_row_pack(row) for row in metric_rows})
-        if len(pack_names) > 1:
-            for pack in pack_names:
-                subset = [row for row in metric_rows if _row_pack(row) == pack]
-                summary_rows.append(_summary_row(root, bundle_dir, summary, subset, pack))
+        # Pack rows are subsets of the overall row; both views appear in the table.
+        grouped_rows = _group_rows(metric_rows)
+        if len(grouped_rows) > 2:
+            for group, subset in list(grouped_rows.items())[1:]:
+                summary_rows.append(_summary_row(
+                    root, bundle_dir, summary, subset, group.removeprefix("pack: ")
+                ))
         report_name = _write_bundle_extremes(report_dir, root, bundle_dir, summary, metric_rows)
         extremes_index.append(
             {
@@ -573,6 +646,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             }
         )
 
+    # Stable sorting makes report diffs independent of filesystem traversal order.
     summary_rows = sorted(summary_rows, key=lambda row: str(row["bundle"]))
     summary_table_txt = report_dir / "summary_table.txt"
     summary_table_txt.write_text(_summary_markdown(summary_rows) + "\n", encoding="utf-8")
@@ -583,6 +657,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _write_csv(report_dir / "extremes_index.csv", extremes_index, ["bundle", "pack", "extremes_report"])
     _write_csv(report_dir / "distribution_stats.csv", distributions, list(distributions[0]))
     _write_csv(report_dir / "pack_macro.csv", pack_macro, list(pack_macro[0]))
+    # The HTML dashboard reads the same per-file scores as the numeric reports.
     _write_dashboard(report_dir / "dashboard.html", plot_bundles)
 
     print(f"[compile_results] bundles: {len(summary_rows)}")
