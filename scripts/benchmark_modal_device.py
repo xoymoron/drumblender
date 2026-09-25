@@ -53,8 +53,6 @@ def main():
         hop_length=768 if args.fast else 256,
         refine=not args.fast,
         fast=args.fast,
-        sampling="random within equal-count duration strata",
-        seed=args.seed,
         max_gap=0 if args.fast else 2,
     )
     cpu = CQTModalAnalysis(48000, compute_device="cpu", **options)
@@ -106,6 +104,8 @@ def main():
         gpu_total_seconds=sum(row["gpu_seconds"] for row in results),
         scope="Analysis only; excludes file reading, output writing, and two-process contention",
         fast=args.fast,
+        sampling="random within equal-count duration strata",
+        seed=args.seed,
         dataset_files=len(files),
         files=results,
     )
