@@ -13,11 +13,7 @@ import torchaudio
 from torchmetrics import Metric
 
 
-# Increment when definitions or numerical conventions change. Legacy SF caches
-# used frequency differences and must never be mixed with temporal SF scores.
-EVALUATION_VERSION = "3-mr-stft-mel-band-envelope"
 DEFAULT_METRICS_CONFIG = Path(__file__).resolve().parents[1] / "cfg/metrics/drumblender_metrics.yaml"
-DIAGNOSTIC_METRICS = ("mr_log_mel", "band_spectral", "log_rms_envelope")
 
 
 def load_evaluation_metrics(config_path=None):
@@ -26,17 +22,6 @@ def load_evaluation_metrics(config_path=None):
 
     path = Path(config_path) if config_path is not None else DEFAULT_METRICS_CONFIG
     spec = yaml.safe_load(path.read_text(encoding="utf-8"))
-    modules = spec["init_args"]["modules"]
-    # Preserve the STFT settings in bundles created before the metric rename.
-    for old, new in (("mss_sc", "mr_stft_sc"), ("mss_log", "mr_stft_log")):
-        if old in modules:
-            if new in modules:
-                raise ValueError(f"Both legacy {old} and {new} are configured")
-            modules[new] = modules.pop(old)
-    if any(name not in modules for name in DIAGNOSTIC_METRICS):
-        defaults = yaml.safe_load(DEFAULT_METRICS_CONFIG.read_text(encoding="utf-8"))
-        for name in DIAGNOSTIC_METRICS:
-            modules.setdefault(name, defaults["init_args"]["modules"][name])
 
     def instantiate(value):
         if isinstance(value, dict):
@@ -50,16 +35,11 @@ def load_evaluation_metrics(config_path=None):
         return value
 
     metrics = instantiate(spec)
-    required = {"lsd", "flux_onset", "mr_stft_sc", "mr_stft_log", *DIAGNOSTIC_METRICS}
+    required = {"lsd", "flux_onset", "mr_stft", "mr_log_mel", "band_spectral", "log_rms_envelope"}
     if not isinstance(metrics, torch.nn.ModuleDict) or not required.issubset(metrics):
         raise ValueError(f"Evaluation config must define {sorted(required)}")
-    protocol = {
-        "version": EVALUATION_VERSION,
-        "config_sha256": hashlib.sha256(
-            json.dumps(spec, sort_keys=True).encode("utf-8")
-        ).hexdigest(),
-    }
-    return metrics, protocol
+    config_sha256 = hashlib.sha256(json.dumps(spec, sort_keys=True).encode("utf-8")).hexdigest()
+    return metrics, config_sha256
 
 
 @torch.no_grad()
@@ -74,15 +54,14 @@ def score_reconstruction(metrics, pred, target, sample_rate=None):
         expected_rate = getattr(metric, "sample_rate", None)
         if sample_rate is not None and expected_rate is not None and sample_rate != expected_rate:
             raise ValueError(f"{name} expects {expected_rate} Hz, received {sample_rate} Hz")
-        x, y = pred, target
-        # Auraloss reflect padding requires more than half an FFT window.
-        fft_sizes = getattr(metric, "fft_sizes", None)
-        if fft_sizes:
-            minimum = max(fft_sizes) // 2 + 1
-            x, y = _pad_to_min_length(x, minimum), _pad_to_min_length(y, minimum)
+        if name == "mr_stft":
+            # Auraloss centers its STFT with reflect padding around the real clip.
+            min_samples = max(metric.fft_sizes) // 2 + 1
+            if pred.shape[-1] < min_samples:
+                raise ValueError(f"MR-STFT requires at least {min_samples} samples")
         if isinstance(metric, Metric):
             metric.reset()
-        value = metric(x, y)
+        value = metric(pred, target)
         if isinstance(metric, Metric):
             metric.reset()
         values = value if isinstance(value, dict) else {name: value}
@@ -90,7 +69,6 @@ def score_reconstruction(metrics, pred, target, sample_rate=None):
             if item.numel() != 1 or not torch.isfinite(item).all():
                 raise ValueError(f"Nonfinite or nonscalar evaluation metric: {key}")
             result[f"test/{key}"] = float(item.detach().cpu())
-    result["test/mr_stft"] = result["test/mr_stft_sc"] + result["test/mr_stft_log"]
     return result
 
 
@@ -99,7 +77,6 @@ def evaluation_score_keys(metrics):
     keys = [f"test/{name}" for name in metrics if name != "band_spectral"]
     keys.extend(f"test/band_{kind}_{name}" for name, _, _ in metrics["band_spectral"].bands
                 for kind in ("lsd", "sc"))
-    keys.append("test/mr_stft")
     return keys
 
 
@@ -119,13 +96,6 @@ def audio_pair_fingerprint(bundle_dir, source_filename):
         else:
             digest.update(b"missing")
     return digest.hexdigest()
-
-
-def _pad_to_min_length(x: torch.Tensor, min_len: int) -> torch.Tensor:
-    """Pad last dimension with zeros so STFT/MFCC kernels can run on short clips."""
-    if x.shape[-1] >= min_len:
-        return x
-    return torch.nn.functional.pad(x, (0, int(min_len - x.shape[-1])))
 
 
 class LogSpectralDistance(Metric):
@@ -161,9 +131,6 @@ class LogSpectralDistance(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
-        x = _pad_to_min_length(x, min_len)
-        y = _pad_to_min_length(y, min_len)
         x = x.squeeze(1)
         y = y.squeeze(1)
 
@@ -207,9 +174,8 @@ class MFCCError(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
-        x = _pad_to_min_length(x, min_len)
-        y = _pad_to_min_length(y, min_len)
+        if x.shape[-1] <= self.n_fft // 2:
+            raise ValueError(f"MFCC requires more than {self.n_fft // 2} samples")
         x = x.squeeze(1)
         y = y.squeeze(1)
 
@@ -337,7 +303,8 @@ class LogRMSEnvelopeError(torch.nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         def envelope(audio):
-            audio = _pad_to_min_length(audio, self.frame_size)
+            if audio.shape[-1] < self.frame_size:
+                raise ValueError(f"Log RMS requires at least {self.frame_size} samples")
             power = torch.nn.functional.avg_pool1d(
                 audio.square(), kernel_size=self.frame_size, stride=self.hop_size
             )
@@ -385,9 +352,8 @@ class SpectralFluxOnsetError(Metric):
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        min_len = max(int(self.n_fft), int(self.n_fft // 2 + 1))
-        x = _pad_to_min_length(x, min_len)
-        y = _pad_to_min_length(y, min_len)
+        if x.shape[-1] < self.hop_size:
+            raise ValueError(f"Spectral flux requires at least {self.hop_size} samples")
 
         x = self._onset_signal(x)
         y = self._onset_signal(y)

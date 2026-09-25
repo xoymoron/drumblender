@@ -31,6 +31,10 @@ applied after the train/validation/test split, so the same test membership is
 used in both cases. Use `--split-manifest PATH` to replay a previous export's
 sample IDs and order.
 
+Metrics score the recorded audio length without extending short clips. The
+current MR-STFT setup needs more than 1024 samples; shorter clips raise an
+error instead of receiving a score changed by extra silence.
+
 To rebuild reports or rescore previously exported WAV pairs without running
 checkpoint inference again:
 
@@ -42,4 +46,5 @@ python scripts/compile_results.py logs/my_reconstruction_test --recompute
 `compile_results.py` also accepts a parent directory containing multiple
 exported bundles, provided they use the same metric configuration. The export
 saves targets by default; `--no-save-target` intentionally skips report
-generation because a later WAV-pair rescore would then be impossible.
+generation because a later WAV-pair rescore would then be impossible. After
+changing metric code, use `--recompute` to refresh scores from the saved WAVs.

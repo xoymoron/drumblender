@@ -552,10 +552,10 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
         dataset.lengths = [lengths_by_key[key] for key in dataset.file_list]
         _copy_if_exists(Path(args.split_manifest), config_root / "input_split_manifest.csv")
 
-    metric_protocol = None
+    metric_config_sha256 = None
     if not args.no_eval:
         # These are independent test metrics; the checkpoint's loss remains separate.
-        metric_modules, metric_protocol = load_evaluation_metrics(args.metrics_config)
+        metric_modules, metric_config_sha256 = load_evaluation_metrics(args.metrics_config)
         metric_modules.to(device)
 
     limit = len(dataset) if args.max_items is None else min(len(dataset), args.max_items)
@@ -615,13 +615,12 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
             losses.append(loss_value)
 
             if not args.no_eval:
-                # Metric rows include enough identity and protocol data to reject stale caches.
+                # Metric rows retain the configuration hash used to validate cached scores.
                 metric_rows.append({
                     "index": idx, "meta_key": meta_key, "source_filename": str(src_rel),
                     "length": length_i, "sample_pack_key": dataset.top_level_pack(meta),
-                    "test/objective": loss_value, "test/loss": loss_value,
-                    "metric_version": metric_protocol["version"],
-                    "metric_config_sha256": metric_protocol["config_sha256"],
+                    "test/loss": loss_value,
+                    "metric_config_sha256": metric_config_sha256,
                     **score_reconstruction(metric_modules, y_hat, x,
                                            sample_rate=data_args["sample_rate"]),
                 })
@@ -677,7 +676,6 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
         # Hash both source metadata and selected IDs so test membership is auditable.
         "metadata_sha256": hashlib.sha256((Path(data_args["data_dir"]) / data_args["meta_file"]).read_bytes()).hexdigest(),
         "selected_ids_sha256": hashlib.sha256(json.dumps(dataset.file_list[:limit]).encode()).hexdigest(),
-        "metric_protocol": metric_protocol,
         "resolved_data": data_args,
         "sample_rate": data_args["sample_rate"],
         "num_samples": data_args["num_samples"],
@@ -703,6 +701,7 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
         }
 
     if not args.no_eval:
+        summary["metric_config_sha256"] = metric_config_sha256
         for key in metric_rows[0]:
             if key.startswith("test/"):
                 summary["metrics"][key] = statistics.fmean(row[key] for row in metric_rows)

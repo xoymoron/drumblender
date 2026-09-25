@@ -46,8 +46,7 @@ def make_pack_key(
     rel = wav_path.relative_to(processed_root)
     parts = rel.parts
 
-    # HIGHLIGHT: Custom dataset policy.
-    # We treat the top-level folder under processed_root as the pack id.
+    # Use the top-level folder under processed_root as the pack id.
     # Subdirectories under the pack are ignored for pack grouping.
     type_name = "custom"
     inst_name = "unlabeled"
@@ -73,7 +72,9 @@ def make_splits_within_pack(
     Split files within each pack.
     """
     if train < 0.0 or val < 0.0 or (train + val) > 1.0:
-        raise ValueError("Invalid split ratios: require train >= 0, val >= 0, train+val <= 1")
+        raise ValueError(
+            "Invalid split ratios: require train >= 0, val >= 0, train+val <= 1"
+        )
 
     by_pack: Dict[str, List[int]] = {}
     for idx, pack in enumerate(pack_keys):
@@ -108,32 +109,76 @@ def make_splits_within_pack(
     return out
 
 
-@torch.no_grad()
-def main():
+def parse_args(argv=None, default_backend="legacy"):
+    """Resolve backend-specific defaults before touching output directories."""
     ap = argparse.ArgumentParser()
 
     # inputs
-    ap.add_argument("--processed_root", type=str, default="../samples/processed")
+    ap.add_argument("--processed_root", type=str, default=None)
 
     # outputs
-    ap.add_argument("--out_dir", type=str, default="../datasets/modal_features/processed_modal_flat")
+    ap.add_argument("--out_dir", type=str, default=None)
     ap.add_argument("--meta_name", type=str, default="metadata.json")
 
     # modal params
     ap.add_argument("--sample_rate", type=int, default=48000)
-    ap.add_argument("--num_modes", type=int, default=64)
+    ap.add_argument(
+        "--modal_backend",
+        choices=("legacy", "hybrid", "stft", "cqt"),
+        default=default_backend,
+    )
+    ap.add_argument(
+        "--num_modes",
+        type=int,
+        default=None,
+        help="Mode ceiling: legacy=64, NEW=128 by default.",
+    )
 
     ap.add_argument("--hop_length", type=int, default=256)
     ap.add_argument("--fmin", type=int, default=20)
     ap.add_argument("--n_bins", type=int, default=240)
     ap.add_argument("--bins_per_octave", type=int, default=24)
-    ap.add_argument("--min_length", type=int, default=10)
-    ap.add_argument("--threshold_db", type=float, default=-80.0)
+    ap.add_argument(
+        "--min_length",
+        type=int,
+        default=None,
+        help="Actual peak observations: legacy=10, NEW=4 by default.",
+    )
+    ap.add_argument(
+        "--threshold_db",
+        type=float,
+        default=None,
+        help="Amplitude floor: legacy=-80, NEW=-90 dBFS.",
+    )
     ap.add_argument("--diff_threshold", type=float, default=5.0)
+    ap.add_argument("--cqt_max_frequency", type=float, default=700.0)
+    ap.add_argument("--short_window", type=int, default=2048)
+    ap.add_argument("--long_window", type=int, default=8192)
+    ap.add_argument("--max_gap", type=int, default=2)
+    ap.add_argument("--max_deviation_hz", type=float, default=40.0)
+    ap.add_argument("--relative_threshold_db", type=float, default=-80.0)
+    ap.add_argument("--min_relative_score_db", type=float, default=-40.0)
+    ap.add_argument("--min_prominence_db", type=float, default=2.0)
+    ap.add_argument(
+        "--no_refine",
+        action="store_true",
+        help="Disable complex-lobe fitting and phase frequency refinement in NEW.",
+    )
 
     # behavior
     ap.add_argument("--seed", type=int, default=5152845)
     ap.add_argument("--max_files", type=int, default=0, help="0 = all files")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip completed files with matching analysis settings.",
+    )
+    ap.add_argument(
+        "--checkpoint_every",
+        type=int,
+        default=100,
+        help="Save metadata after this many new files.",
+    )
     ap.add_argument(
         "--pack_depth",
         type=int,
@@ -153,7 +198,7 @@ def main():
     )
 
     # failure handling
-    # HIGHLIGHT: Auto-padding retry is enabled by default to handle short files
+    # Auto-padding retry is enabled by default to handle short files
     # that fail inside nnAudio CQT reflect padding.
     ap.add_argument(
         "--pad_short",
@@ -168,15 +213,66 @@ def main():
         help="Disable auto right-padding retry for CQT reflect-pad failures.",
     )
     ap.set_defaults(pad_short=True)
-    ap.add_argument("--pad_to", type=int, default=0, help="If >0, right-pad audio shorter than this to this length (samples).")
-    ap.add_argument("--min_duration_ms", type=float, default=0.0, help="If >0, skip files shorter than this (ms). Set 0 to not skip.")
-    args = ap.parse_args()
+    ap.add_argument(
+        "--pad_to",
+        type=int,
+        default=0,
+        help="If >0, right-pad audio shorter than this to this length (samples).",
+    )
+    ap.add_argument(
+        "--min_duration_ms",
+        type=float,
+        default=0.0,
+        help="If >0, skip files shorter than this (ms). Set 0 to not skip.",
+    )
+    args = ap.parse_args(argv)
+    is_new = args.modal_backend != "legacy"
+    if args.num_modes is None:
+        args.num_modes = 128 if is_new else 64
+    if args.min_length is None:
+        args.min_length = 4 if is_new else 10
+    if args.threshold_db is None:
+        args.threshold_db = -90.0 if is_new else -80.0
+    if args.num_modes < 1:
+        ap.error("--num_modes must be positive")
+    if args.checkpoint_every < 1:
+        ap.error("--checkpoint_every must be positive")
+    if args.processed_root is None:
+        args.processed_root = (
+            "../datasets/processed" if is_new else "../samples/processed"
+        )
+    if args.out_dir is None:
+        directory = (
+            f"processed_modal_new{args.num_modes}" if is_new else "processed_modal_flat"
+        )
+        args.out_dir = str(Path("../datasets/modal_features") / directory)
+    return args
+
+
+@torch.no_grad()
+def main(default_backend="legacy"):
+    args = parse_args(default_backend=default_backend)
+    is_new = args.modal_backend != "legacy"
 
     processed_root = Path(args.processed_root)
     if not processed_root.exists():
         raise FileNotFoundError(processed_root)
 
     out_dir = Path(args.out_dir)
+    config_path = out_dir / "modal_config.json"
+    meta_path = out_dir / args.meta_name
+    if args.resume and config_path.exists():
+        previous = json.loads(config_path.read_text(encoding="utf-8"))
+        for name, value in vars(args).items():
+            if (
+                name not in {"resume", "checkpoint_every", "max_files"}
+                and previous.get(name) != value
+            ):
+                raise ValueError(
+                    f"Cannot resume with changed {name}: {previous.get(name)!r} != {value!r}"
+                )
+    elif args.resume and meta_path.exists():
+        raise ValueError("Cannot resume metadata without modal_config.json.")
     audio_dir = out_dir / "audio"
     feat_dir = out_dir / "features"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -203,12 +299,31 @@ def main():
 
     split_by_index = None
     if args.write_split:
-        # HIGHLIGHT: Optional backward compatibility path.
-        # For the current workflow we keep this disabled so the dataset class
+        # Keep this optional path disabled by default so the dataset class
         # computes split dynamically from sample_pack_key and seed.
         split_by_index = make_splits_within_pack(packs, seed=args.seed)
 
-    modal = CQTModalAnalysis(
+    analyzer_class = CQTModalAnalysis
+    new_options = {}
+    if is_new:
+        from drumblender.utils.modal_analysis_new import (
+            CQTModalAnalysis as NewModalAnalysis,
+        )
+
+        analyzer_class = NewModalAnalysis
+        new_options = dict(
+            backend=args.modal_backend,
+            cqt_max_frequency=args.cqt_max_frequency,
+            short_window=args.short_window,
+            long_window=args.long_window,
+            max_gap=args.max_gap,
+            max_deviation_hz=args.max_deviation_hz,
+            relative_threshold_db=args.relative_threshold_db,
+            min_relative_score_db=args.min_relative_score_db,
+            min_prominence_db=args.min_prominence_db,
+            refine=not args.no_refine,
+        )
+    modal = analyzer_class(
         args.sample_rate,
         hop_length=args.hop_length,
         fmin=args.fmin,
@@ -218,11 +333,24 @@ def main():
         num_modes=args.num_modes,
         threshold=args.threshold_db,
         diff_threshold=args.diff_threshold,
+        **new_options,
     )
+    config_path.write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
 
-    meta: Dict[str, Dict] = {}
+    meta: Dict[str, Dict] = (
+        json.loads(meta_path.read_text(encoding="utf-8"))
+        if args.resume and meta_path.exists()
+        else {}
+    )
     failed = 0
     kept = 0
+    skipped = 0
+
+    def save_metadata() -> None:
+        # A replace keeps a usable checkpoint if the process stops mid-write.
+        temporary = meta_path.with_name(meta_path.name + ".tmp")
+        temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(meta_path)
 
     def right_pad_to(w: torch.Tensor, target: int) -> torch.Tensor:
         t = int(w.shape[-1])
@@ -231,7 +359,7 @@ def main():
         return torch.nn.functional.pad(w, (0, target - t))
 
     def num_frames_from_len(T: int, hop: int) -> int:
-        # 대충 CQT 결과 프레임 수와 비슷하게 맞추는 용도 (최소 1)
+        # Legacy fallback for analyzers that cannot return an empty mode tensor.
         return max(1, math.ceil(T / hop))
 
     def extract_feat(w: torch.Tensor) -> torch.Tensor:
@@ -243,16 +371,16 @@ def main():
             modal_freqs, modal_amps, modal_phases = modal(w)  # expected (1, M, F)
         except RuntimeError as e:
             msg = str(e)
-            # 0개 모달 케이스가 내부에서 torch.stack([])로 터지는 경우를 흡수
+            # Older analyzers stack an empty list when no mode survives.
             if "non-empty TensorList" in msg:
                 F = num_frames_from_len(int(w.shape[-1]), args.hop_length)
                 z = w.new_zeros((3, 0, F))
                 return z
             raise
 
-        # 혹시라도 구현이 M=0 텐서를 반환하는 경우까지 방어
+        # Preserve the analyzer's exact frame grid, including silent NEW input.
         if modal_freqs.numel() == 0 or modal_freqs.shape[1] == 0:
-            F = num_frames_from_len(int(w.shape[-1]), args.hop_length)
+            F = modal_freqs.shape[-1]
             return w.new_zeros((3, 0, F))
 
         modal_freqs = 2 * torch.pi * modal_freqs / args.sample_rate
@@ -261,7 +389,7 @@ def main():
         return feat
 
     def infer_required_length_from_padding_error(msg: str, current_len: int) -> int:
-        # HIGHLIGHT: Parse nnAudio/torch padding error and choose a safe retry length.
+        # Parse nnAudio/torch padding errors and choose a safe retry length.
         m = re.search(r"padding\s+\((\d+),\s*(\d+)\)", msg)
         if m:
             pad_l = int(m.group(1))
@@ -282,6 +410,14 @@ def main():
     for idx, (wav_path, (type_name, inst_name, pack)) in enumerate(pbar):
         rel = wav_path.relative_to(processed_root)
         key = stable_id(str(rel))
+        if args.resume and key in meta:
+            existing = meta[key]
+            if (out_dir / existing["filename"]).is_file() and (
+                out_dir / existing["feature_file"]
+            ).is_file():
+                skipped += 1
+                pbar.set_postfix(kept=kept, skipped=skipped, failed=failed)
+                continue
 
         try:
             wav, sr = torchaudio.load(str(wav_path))  # [C,T]
@@ -290,7 +426,9 @@ def main():
 
             # no resample: enforce preprocessed sample rate
             if sr != args.sample_rate:
-                raise ValueError(f"sample_rate mismatch: {sr} != {args.sample_rate} for {rel}")
+                raise ValueError(
+                    f"sample_rate mismatch: {sr} != {args.sample_rate} for {rel}"
+                )
 
             # mono-only policy: always channel 0
             if wav.shape[0] == 0:
@@ -301,7 +439,9 @@ def main():
             if args.min_duration_ms and args.min_duration_ms > 0:
                 min_samples = int(args.sample_rate * (args.min_duration_ms / 1000.0))
                 if wav.shape[-1] < min_samples:
-                    raise ValueError(f"too_short: {wav.shape[-1]} < {min_samples} samples")
+                    raise ValueError(
+                        f"too_short: {wav.shape[-1]} < {min_samples} samples"
+                    )
 
             # optional fixed padding floor
             if args.pad_to and args.pad_to > 0:
@@ -312,18 +452,23 @@ def main():
                 feat = extract_feat(wav)
             except RuntimeError as e:
                 msg = str(e)
-                if (not args.pad_short) or ("Padding size should be less than the corresponding input dimension" not in msg):
+                if (not args.pad_short) or (
+                    "Padding size should be less than the corresponding input dimension"
+                    not in msg
+                ):
                     raise
 
-                # HIGHLIGHT: Single retry only.
                 # Apply one right-padding pass and retry once; if it still fails,
                 # propagate the error and mark this file as failed.
-                target = infer_required_length_from_padding_error(msg, int(wav.shape[-1]))
+                target = infer_required_length_from_padding_error(
+                    msg, int(wav.shape[-1])
+                )
                 wav_try = right_pad_to(wav, target)
                 feat = extract_feat(wav_try)
 
             # force fixed num_modes
             p, m, f = feat.shape
+            active_modes = int(torch.any(feat[1] != 0, dim=-1).sum())
             if m < args.num_modes:
                 pad = feat.new_zeros((p, args.num_modes - m, f))
                 feat = torch.cat([feat, pad], dim=1)
@@ -344,24 +489,29 @@ def main():
                 "type": type_name,
                 "num_samples": int(wav.shape[-1]),
                 "orig_relpath": str(rel),
+                "modal_backend": args.modal_backend,
+                "modal_slots": args.num_modes,
+                "active_modes": active_modes,
             }
             if split_by_index is not None:
                 meta_item["split"] = split_by_index[idx]
             meta[key] = meta_item
 
             kept += 1
+            if kept % args.checkpoint_every == 0:
+                save_metadata()
 
         except Exception as e:
             failed += 1
             print("fail:", str(rel), "->", repr(e))
 
-        pbar.set_postfix(kept=kept, failed=failed)
+        pbar.set_postfix(kept=kept, skipped=skipped, failed=failed)
 
-    meta_path = out_dir / args.meta_name
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False)
+    save_metadata()
 
-    print("[done] kept:", len(meta), "failed:", failed)
+    print(
+        "[done] total:", len(meta), "new:", kept, "skipped:", skipped, "failed:", failed
+    )
     print("out_dir:", out_dir)
     print("meta:", meta_path)
 

@@ -198,19 +198,10 @@ def _sample_name(row: Dict[str, object]) -> str:
     return f"row_{row.get('__row_idx__', 'unknown')}"
 
 
-def _metric_config(bundle_dir: Path):
-    """Find the metric YAML copied into an exported bundle."""
-    for name in ("evaluation_metrics.yaml", "drumblender_metrics.yaml"):
-        path = bundle_dir / "configs" / name
-        if path.is_file():
-            return path
-    return None
-
-
-def _compute_metric_rows(bundle_dir, loss_rows, metrics, protocol):
+def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
     """Rescore paired WAVs and refresh the per-file cache for this bundle."""
     metric_rows = []
-    for i, source in enumerate(loss_rows):
+    for source in loss_rows:
         src_rel = str(source.get("source_filename", "")).replace("\\", "/")
         fingerprint = audio_pair_fingerprint(bundle_dir, src_rel)
         recon_path = bundle_dir / "recon" / src_rel
@@ -229,10 +220,8 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics, protocol):
                                       target[None, :, :length], sample_rate=sr_t)
         row = dict(source)
         row.update(scores)
-        row.update({"index": source.get("index", i), "sample_pack_key": _row_pack(source),
-                    "test/objective": source.get("test/loss", ""),
-                    "metric_version": protocol["version"],
-                    "metric_config_sha256": protocol["config_sha256"],
+        row.update({"sample_pack_key": _row_pack(source),
+                    "metric_config_sha256": config_sha256,
                     "audio_sha256": fingerprint})
         metric_rows.append(row)
     if not metric_rows:
@@ -249,20 +238,23 @@ def _row_pack(row):
     return str(row.get("sample_pack_key") or "__root__").replace("\\", "/").split("/", 1)[0]
 
 
-def _cache_matches(bundle_dir, rows, loss_rows, metrics, protocol):
+def _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
     """Reuse scores only when sample order, metric setup, and both WAVs still match."""
     if not rows or len(rows) != len(loss_rows):
         return False
 
     required_scores = evaluation_score_keys(metrics)
+    expected_columns = set(loss_rows[0]) | set(required_scores) | {
+        "sample_pack_key", "metric_config_sha256", "audio_sha256"
+    }
+    if set(rows[0]) != expected_columns:
+        return False
     for row, source in zip(rows, loss_rows):
         # Reject changes in sample order, metric setup, scores, or paired WAV content.
         if any(row.get(key) != source.get(key)
                for key in ("meta_key", "source_filename", "length")):
             return False
-        if row.get("metric_version") != protocol["version"]:
-            return False
-        if row.get("metric_config_sha256") != protocol["config_sha256"]:
+        if row.get("metric_config_sha256") != config_sha256:
             return False
         if any(not _is_finite(_to_float(row.get(key))) for key in required_scores):
             return False
@@ -273,7 +265,7 @@ def _cache_matches(bundle_dir, rows, loss_rows, metrics, protocol):
     return True
 
 
-def _load_or_compute_metric_rows(bundle_dir: Path, metrics, protocol, recompute=False):
+def _load_or_compute_metric_rows(bundle_dir: Path, metrics, config_sha256, recompute=False):
     """Load a valid cache or rescore the paired audio when it is stale or forced."""
     loss_csv = bundle_dir / "evaluation" / "per_file_loss.csv"
     if not loss_csv.is_file():
@@ -282,9 +274,9 @@ def _load_or_compute_metric_rows(bundle_dir: Path, metrics, protocol, recompute=
     cache = bundle_dir / "evaluation" / "per_file_metrics.csv"
     if cache.is_file() and not recompute:
         rows = _read_csv(cache)
-        if _cache_matches(bundle_dir, rows, loss_rows, metrics, protocol):
+        if _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
             return rows
-    return _compute_metric_rows(bundle_dir, loss_rows, metrics, protocol)
+    return _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256)
 
 
 def _pack_label(summary: Dict[str, Any]) -> str:
@@ -461,7 +453,7 @@ def _distribution_stats(bundle, rows):
     primary = {column for _, column in RANK_METRICS}
     extra = sorted(key for key in rows[0]
                    if key.startswith("test/") and key not in primary
-                   and key not in ("test/loss", "test/objective"))
+                   and key != "test/loss")
     reported_metrics = RANK_METRICS + [(key.removeprefix("test/"), key) for key in extra]
     for group, examples in _group_rows(rows).items():
         for label, column in reported_metrics:
@@ -499,7 +491,7 @@ def _write_dashboard(path, bundles):
         primary = {column for _, column in RANK_METRICS}
         secondary = sorted(key for key in rows[0]
                            if key.startswith("test/") and key not in primary
-                           and key not in ("test/loss", "test/objective"))
+                           and key != "test/loss")
         plots = RANK_METRICS + [(key.removeprefix("test/").replace("_", " ").title(), key)
                                 for key in secondary]
         for label, column in plots:
@@ -536,21 +528,15 @@ def _write_dashboard(path, bundles):
 
 
 def _update_bundle_summary(bundle_dir, summary, metric_rows):
-    """Refresh current summary scores while preserving metrics from older protocols."""
-    current_version = metric_rows[0]["metric_version"]
-    if (summary.get("metric_protocol") or {}).get("version") != current_version:
-        summary.setdefault("legacy_metrics", summary.get("metrics", {}).copy())
-        for old_key in ("test/mss", "test/mss_sc", "test/mss_log"):
-            summary.setdefault("metrics", {}).pop(old_key, None)
-
-    summary["metric_protocol"] = {
-        "version": current_version,
-        "config_sha256": metric_rows[0]["metric_config_sha256"],
-    }
-    current_metrics = summary.setdefault("metrics", {})
+    """Replace stored aggregate scores with the current per-file evaluation."""
+    summary.pop("metric_protocol", None)
+    summary.pop("legacy_metrics", None)
+    summary["metric_config_sha256"] = metric_rows[0]["metric_config_sha256"]
+    current_metrics = {}
     for key in metric_rows[0]:
-        if key.startswith("test/") and key not in ("test/loss", "test/objective"):
+        if key.startswith("test/"):
             current_metrics[key] = statistics.fmean(float(row[key]) for row in metric_rows)
+    summary["metrics"] = current_metrics
 
     eval_dir = bundle_dir / "evaluation"
     (eval_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -589,11 +575,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     bundle_dirs = _bundle_dirs(root)
     bundle_dirs = sorted(bundle_dirs, key=lambda p: _bundle_relpath(root, p))
     configured_bundles = [
-        (bundle, *load_evaluation_metrics(_metric_config(bundle)))
+        (bundle, *load_evaluation_metrics(bundle / "configs" / "evaluation_metrics.yaml"))
         for bundle in bundle_dirs
     ]
-    # Comparisons are valid only when every bundle uses the same metric protocol.
-    if len({protocol["config_sha256"] for _, _, protocol in configured_bundles}) != 1:
+    # Comparisons are valid only when every bundle uses the same metric configuration.
+    if len({config_sha256 for _, _, config_sha256 in configured_bundles}) != 1:
         raise ValueError("Cannot combine runs using different evaluation metric configurations")
 
     # Keep a single bundle's reports beside it; combine run reports at the root.
@@ -611,14 +597,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     plot_bundles = []
     pack_macro = []
 
-        # Validate caches and summarize each bundle before writing combined reports.
-    for bundle_dir, metrics, protocol in configured_bundles:
+    # Validate caches and summarize each bundle before writing combined reports.
+    for bundle_dir, metrics, config_sha256 in configured_bundles:
         summary_path = bundle_dir / "evaluation" / "summary.json"
         with summary_path.open("r", encoding="utf-8") as f:
             summary = json.load(f)
 
         metric_rows = _load_or_compute_metric_rows(
-            bundle_dir, metrics, protocol, recompute=args.recompute
+            bundle_dir, metrics, config_sha256, recompute=args.recompute
         )
         _update_bundle_summary(bundle_dir, summary, metric_rows)
         relpath = _bundle_relpath(root, bundle_dir)
