@@ -43,7 +43,7 @@ def preprocess_audio_file(
     ``device`` (cpu, cuda, cuda:N, or auto); decoding and saving use CPU tensors.
     """
     compute_device = resolve_device(device)
-    waveform, orig_freq = torchaudio.load(input_file)
+    waveform, orig_freq = torchaudio.load(str(input_file))
     assert waveform.ndim == 2, "Expecting a 2D tensor, channels x samples"
     waveform = waveform.to(compute_device)
 
@@ -95,7 +95,7 @@ def preprocess_audio_file(
             waveform = torch.nn.functional.pad(waveform, (0, num_pad))
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    torchaudio.save(output_file, waveform.cpu(), sample_rate)
+    torchaudio.save(str(output_file), waveform.cpu(), sample_rate)
 
 
 def select_highest_rms_channel(waveform: torch.Tensor) -> torch.Tensor:

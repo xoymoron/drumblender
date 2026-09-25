@@ -75,6 +75,35 @@ def test_preprocess_audio_file_resample_stereo(tmp_path_factory):
     assert waveform.shape[0] == 1
 
 
+def test_preprocess_audio_file_passes_string_paths_to_torchaudio(tmp_path, monkeypatch):
+    """Keep preprocessing compatible with SoX backends that reject Path objects."""
+    input_file = tmp_path / "input.wav"
+    output_file = tmp_path / "output.wav"
+    calls = {}
+
+    def fake_load(path):
+        calls["load_path"] = path
+        return torch.ones(1, 512), 16000
+
+    def fake_save(path, waveform, sample_rate):
+        calls["save_path"] = path
+        calls["waveform"] = waveform
+        calls["sample_rate"] = sample_rate
+
+    monkeypatch.setattr(audio_utils.torchaudio, "load", fake_load)
+    monkeypatch.setattr(audio_utils.torchaudio, "save", fake_save)
+
+    audio_utils.preprocess_audio_file(
+        input_file=input_file,
+        output_file=output_file,
+        sample_rate=16000,
+        num_samples=512,
+    )
+
+    assert calls["load_path"] == str(input_file)
+    assert calls["save_path"] == str(output_file)
+
+
 def test_preprocess_audio_file_selects_the_channel_with_higher_rms(
     tmp_path_factory,
 ):
