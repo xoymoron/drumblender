@@ -263,6 +263,8 @@ def inspect_file(source, output, args):
         min_length=args.min_length,
         min_relative_score_db=args.min_relative_score_db,
         refine=not args.no_refine,
+        compute_device=args.compute_device,
+        gpu_cqt_batch_size=args.gpu_cqt_batch_size,
     )
     result = analyzer.analyze(audio)
     started = perf_counter()
@@ -298,6 +300,7 @@ def inspect_file(source, output, args):
         sample_rate=sample_rate,
         duration_seconds=duration,
         backend=args.backend,
+        compute_device=args.compute_device,
         mode_limit=args.num_modes,
         modes=len(result.frequencies),
         candidates_before_limit=result.candidates_before_limit,
@@ -336,6 +339,8 @@ def main():
     parser.add_argument("--num_modes", type=int, default=128)
     parser.add_argument("--min_length", type=int, default=4)
     parser.add_argument("--min_relative_score_db", type=float, default=-40.0)
+    parser.add_argument("--compute_device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--gpu_cqt_batch_size", type=int, default=16)
     parser.add_argument("--no_refine", action="store_true")
     parser.add_argument("--compare_legacy", action="store_true")
     parser.add_argument("--legacy_modes", type=int, default=64)

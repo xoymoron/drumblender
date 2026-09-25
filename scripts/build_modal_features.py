@@ -12,8 +12,6 @@ import torchaudio
 from tqdm import tqdm
 import math
 
-from drumblender.utils.modal_analysis import CQTModalAnalysis
-
 
 def stable_id(rel_path: str) -> str:
     # deterministic numeric-ish id from path
@@ -160,6 +158,18 @@ def parse_args(argv=None, default_backend="legacy"):
     ap.add_argument("--min_relative_score_db", type=float, default=-40.0)
     ap.add_argument("--min_prominence_db", type=float, default=2.0)
     ap.add_argument(
+        "--compute_device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="NEW only: CQT/STFT FFTs run here; peak tracking stays on CPU.",
+    )
+    ap.add_argument(
+        "--gpu_cqt_batch_size",
+        type=int,
+        default=16,
+        help="NEW CUDA only: CQT filters per FFT batch; lower to reduce VRAM.",
+    )
+    ap.add_argument(
         "--no_refine",
         action="store_true",
         help="Disable complex-lobe fitting and phase frequency refinement in NEW.",
@@ -168,6 +178,8 @@ def parse_args(argv=None, default_backend="legacy"):
     # behavior
     ap.add_argument("--seed", type=int, default=5152845)
     ap.add_argument("--max_files", type=int, default=0, help="0 = all files")
+    ap.add_argument("--num_shards", type=int, default=1)
+    ap.add_argument("--shard_index", type=int, default=0)
     ap.add_argument(
         "--resume",
         action="store_true",
@@ -237,6 +249,14 @@ def parse_args(argv=None, default_backend="legacy"):
         ap.error("--num_modes must be positive")
     if args.checkpoint_every < 1:
         ap.error("--checkpoint_every must be positive")
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        ap.error("Require num_shards >= 1 and 0 <= shard_index < num_shards")
+    if args.gpu_cqt_batch_size < 1:
+        ap.error("--gpu_cqt_batch_size must be positive")
+    if args.write_split and args.num_shards > 1:
+        ap.error("--write_split is not supported with sharded extraction")
+    if not is_new and args.compute_device != "cpu":
+        ap.error("--compute_device cuda is only supported by the NEW analyzer")
     if args.processed_root is None:
         args.processed_root = (
             "../datasets/processed" if is_new else "../samples/processed"
@@ -246,6 +266,8 @@ def parse_args(argv=None, default_backend="legacy"):
             f"processed_modal_new{args.num_modes}" if is_new else "processed_modal_flat"
         )
         args.out_dir = str(Path("../datasets/modal_features") / directory)
+    if args.num_shards > 1:
+        args.out_dir = str(Path(args.out_dir) / f"shard_{args.shard_index}")
     return args
 
 
@@ -279,10 +301,15 @@ def main(default_backend="legacy"):
     feat_dir.mkdir(parents=True, exist_ok=True)
 
     wavs = list_wavs(processed_root)
+    total_wavs = len(wavs)
+    wavs = wavs[args.shard_index :: args.num_shards]
     if args.max_files and args.max_files > 0:
         wavs = wavs[: args.max_files]
 
-    print(f"[scan] {processed_root} -> {len(wavs)} wavs")
+    print(
+        f"[scan] {processed_root} -> {total_wavs} wavs; "
+        f"shard {args.shard_index}/{args.num_shards} -> {len(wavs)} wavs"
+    )
     if len(wavs) == 0:
         raise RuntimeError("No wavs found.")
 
@@ -303,7 +330,7 @@ def main(default_backend="legacy"):
         # computes split dynamically from sample_pack_key and seed.
         split_by_index = make_splits_within_pack(packs, seed=args.seed)
 
-    analyzer_class = CQTModalAnalysis
+    analyzer_class = None
     new_options = {}
     if is_new:
         from drumblender.utils.modal_analysis_new import (
@@ -322,7 +349,13 @@ def main(default_backend="legacy"):
             min_relative_score_db=args.min_relative_score_db,
             min_prominence_db=args.min_prominence_db,
             refine=not args.no_refine,
+            compute_device=args.compute_device,
+            gpu_cqt_batch_size=args.gpu_cqt_batch_size,
         )
+    else:
+        from drumblender.utils.modal_analysis import CQTModalAnalysis
+
+        analyzer_class = CQTModalAnalysis
     modal = analyzer_class(
         args.sample_rate,
         hop_length=args.hop_length,

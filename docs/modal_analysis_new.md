@@ -147,6 +147,13 @@ and parallel-worker CLI are retired rather than silently ignored.
 
 ## CPU scope
 
+An optional `--compute_device cuda` path now runs the CQT and STFT spectral
+transforms on one CUDA GPU while keeping peak fitting and tracking on CPU.
+Two-GPU extraction uses separate file shards and a metadata merge. The complete
+Conda, benchmark, extraction, resume, and merge commands are in
+`docs/modal_gpu_server.md`. No 3090 timing or GPU-versus-CPU output comparison
+has been measured on this local machine.
+
 Analysis is centered and noncausal. A 20 Hz CQT filter at 24 bins/octave still
 spans about 1.7 seconds of audio; FFT convolution reduces computation, not the
 required context. For a sample-loading plugin, analyze/cache parameters when a

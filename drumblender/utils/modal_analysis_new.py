@@ -1,9 +1,9 @@
-"""CPU modal analysis with LF CQT, complementary STFTs, and explicit observations.
+"""Modal analysis with LF CQT, complementary STFTs, and explicit observations.
 
 This is an offline, centered analysis front end, not a causal audio callback.
 The historical class name and (frequencies, amplitudes, phases) interface are
 retained. Frequencies are in Hz; convert to radians/sample for ModalSynth.
-NumPy/SciPy perform analysis; PyTorch is needed only for Tensor input.
+NumPy/SciPy perform tracking. CUDA mode offloads spectral transforms to PyTorch.
 """
 
 from dataclasses import dataclass, field
@@ -115,6 +115,8 @@ class CQTModalAnalysis:
         max_peaks: Optional[int] = None,
         frame_block_size: int = 128,
         refine: bool = True,
+        compute_device: str = "cpu",
+        gpu_cqt_batch_size: int = 16,
     ):
         if sample_rate <= 0 or hop_length < 1 or fmin <= 0 or fmin >= sample_rate / 2:
             raise ValueError(
@@ -145,6 +147,17 @@ class CQTModalAnalysis:
             raise ValueError("Frequency matching tolerances must be positive.")
         if p_kernel < 3 or cqt_max_frequency <= 0:
             raise ValueError("Invalid contrast kernel or CQT crossover.")
+        if compute_device not in {"cpu", "cuda"}:
+            raise ValueError("compute_device must be cpu or cuda.")
+        if gpu_cqt_batch_size < 1:
+            raise ValueError("gpu_cqt_batch_size must be positive.")
+        if compute_device == "cuda":
+            import torch
+
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "CUDA was requested, but PyTorch cannot use a CUDA GPU."
+                )
         self.sample_rate = sample_rate
         self.hop_length = hop_length
         self.fmin = fmin
@@ -174,6 +187,8 @@ class CQTModalAnalysis:
         self.long_window = long_window
         self.frame_block_size = frame_block_size
         self.refine = refine
+        self.compute_device = compute_device
+        self.gpu_cqt_batch_size = gpu_cqt_batch_size
         self.max_peaks = (
             max_peaks if max_peaks is not None else max(256, 2 * (num_modes or 128))
         )
@@ -275,50 +290,79 @@ class CQTModalAnalysis:
         lengths = (np.ceil(quality * rate / frequencies).astype(int) // 2) * 2 + 1
         width = int(lengths.max())
         transform_size = fft.next_fast_len(len(reduced) + width - 1)
-        spectrum = fft.fft(reduced, transform_size, workers=1)
-        positions = centers / factor
-        left = np.floor(positions).astype(int)
-        fraction = positions - left
-        coefficients = np.empty((len(centers), len(frequencies)), np.complex64)
-        # One kernel at a time bounds workspace memory independently of bin count.
-        for index, (frequency, length) in enumerate(zip(frequencies, lengths)):
-            offsets = np.arange(length) - length // 2
-            window = signal.windows.hann(length, sym=True)
-            kernel = np.zeros(width, np.complex64)
-            start = (width - length) // 2
-            kernel[start : start + length] = (
-                2
-                * window
-                / window.sum()
-                * np.exp(2j * np.pi * frequency * offsets / rate)
+        if self.compute_device == "cuda":
+            from drumblender.utils.modal_gpu_frontend import cqt_coefficients
+
+            coefficients = cqt_coefficients(
+                reduced,
+                rate,
+                centers,
+                frequencies,
+                lengths,
+                width,
+                transform_size,
+                factor,
+                self.compute_device,
+                self.gpu_cqt_batch_size,
             )
-            convolved = fft.ifft(
-                spectrum * fft.fft(kernel, transform_size, workers=1), workers=1
-            )
-            start = width // 2
-            # Interpolate the demodulated coefficient, not its rotating carrier.
-            first = convolved[start + np.clip(left, 0, len(reduced) - 1)]
-            second = convolved[start + np.clip(left + 1, 0, len(reduced) - 1)]
-            rotation = np.exp(2j * np.pi * frequency / rate)
-            coefficients[:, index] = (
-                (1 - fraction) * first + fraction * second / rotation
-            ) * np.exp(2j * np.pi * frequency * fraction / rate)
+        else:
+            spectrum = fft.fft(reduced, transform_size, workers=1)
+            positions = centers / factor
+            left = np.floor(positions).astype(int)
+            fraction = positions - left
+            coefficients = np.empty((len(centers), len(frequencies)), np.complex64)
+            # One kernel at a time bounds workspace memory independently of bin count.
+            for index, (frequency, length) in enumerate(zip(frequencies, lengths)):
+                offsets = np.arange(length) - length // 2
+                window = signal.windows.hann(length, sym=True)
+                kernel = np.zeros(width, np.complex64)
+                start = (width - length) // 2
+                kernel[start : start + length] = (
+                    2
+                    * window
+                    / window.sum()
+                    * np.exp(2j * np.pi * frequency * offsets / rate)
+                )
+                convolved = fft.ifft(
+                    spectrum * fft.fft(kernel, transform_size, workers=1), workers=1
+                )
+                start = width // 2
+                # Interpolate the demodulated coefficient, not its rotating carrier.
+                first = convolved[start + np.clip(left, 0, len(reduced) - 1)]
+                second = convolved[start + np.clip(left + 1, 0, len(reduced) - 1)]
+                rotation = np.exp(2j * np.pi * frequency / rate)
+                coefficients[:, index] = (
+                    (1 - fraction) * first + fraction * second / rotation
+                ) * np.exp(2j * np.pi * frequency * fraction / rate)
         for frame, values in enumerate(coefficients):
             peaks = self._peaks(values, frequencies, floor, frequencies / quality, 0)
             peaks = peaks[peaks[:, FREQUENCY] <= upper]
             frames[frame] = np.concatenate((frames[frame], peaks))
 
     def _add_stft_peaks(self, audio, centers, floor, frames, size, source):
-        window = signal.windows.hann(size, sym=False).astype(np.float32)
-        padded = np.pad(audio, (size // 2, size // 2))
-        view = np.lib.stride_tricks.sliding_window_view(padded, size)
         grid = fft.rfftfreq(size, 1 / self.sample_rate)
-        rotation = (1 - 2 * (np.arange(len(grid)) % 2)).astype(np.float32)
-        for start in range(0, len(centers), self.frame_block_size):
-            stop = min(start + self.frame_block_size, len(centers))
-            locations = np.rint(centers[start:stop]).astype(int)
-            spectra = fft.rfft(view[locations] * window, axis=1, workers=1)
-            spectra *= (2 / window.sum()) * rotation
+        if self.compute_device == "cuda":
+            from drumblender.utils.modal_gpu_frontend import stft_blocks
+
+            blocks = stft_blocks(
+                audio, centers, size, self.frame_block_size, self.compute_device
+            )
+        else:
+            window = signal.windows.hann(size, sym=False).astype(np.float32)
+            padded = np.pad(audio, (size // 2, size // 2))
+            view = np.lib.stride_tricks.sliding_window_view(padded, size)
+            rotation = (1 - 2 * (np.arange(len(grid)) % 2)).astype(np.float32)
+
+            def cpu_blocks():
+                for start in range(0, len(centers), self.frame_block_size):
+                    stop = min(start + self.frame_block_size, len(centers))
+                    locations = np.rint(centers[start:stop]).astype(int)
+                    spectra = fft.rfft(view[locations] * window, axis=1, workers=1)
+                    spectra *= (2 / window.sum()) * rotation
+                    yield start, locations, spectra
+
+            blocks = cpu_blocks()
+        for start, locations, spectra in blocks:
             for offset, values in enumerate(spectra):
                 frame = start + offset
                 error = (centers[frame] - locations[offset]) / self.sample_rate
