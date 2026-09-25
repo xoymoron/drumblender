@@ -149,7 +149,8 @@ and parallel-worker CLI are retired rather than silently ignored.
 
 An optional `--compute_device cuda` path now runs the CQT and STFT spectral
 transforms on one CUDA GPU while keeping peak fitting and tracking on CPU.
-Two-GPU extraction uses separate file shards and a metadata merge. The complete
+The single-command two-GPU launcher uses separate file shards and merges their
+metadata after both workers finish. The complete
 Conda, benchmark, extraction, resume, and merge commands are in
 `docs/modal_gpu_server.md`. No 3090 timing or GPU-versus-CPU output comparison
 has been measured on this local machine.

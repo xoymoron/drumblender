@@ -10,13 +10,14 @@ is run.
 ## 1. Create and activate an environment
 
 ```bash
-conda create -n drumblender-modal python=3.11 -y
+conda create -n drumblender-modal python=3.10 -y
 conda activate drumblender-modal
 cd /path/to/drumblender
 python -m pip install --upgrade pip
 ```
 
-Python 3.11 is within this repository's declared `>=3.10,<3.13` range. Check
+Python 3.10 is within this repository's declared `>=3.10,<3.13` range, and
+PyTorch 2.7.1 provides Linux CUDA wheels for Python 3.10. Check
 the NVIDIA driver with `nvidia-smi`. Install the CUDA 12.6 PyTorch 2.7.1 wheels
 only if that driver supports them; the official PyTorch 2.7.1 archive also has
 CUDA 11.8 wheels for older compatible drivers.
@@ -43,43 +44,32 @@ analysis calls. The script samples different WAV lengths, but 16 files cannot
 guarantee full-dataset speed or equivalent results for every cymbal. Inspect
 the reported CPU/GPU mode counts and a few modal outputs before full export.
 
-## 3. Extract two independent shards
-
-Run the following commands **at the same time in two terminals**. Both scan the
-same sorted WAV list and take alternate items. Each process sees only its own
-GPU as CUDA device 0 and writes to a separate `shard_*` directory.
-
-Terminal 1:
+## 3. Extract with both GPUs in one command
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python -m scripts.build_modal_features_new --processed_root ../datasets/processed --out_dir ../datasets/modal_features/processed_modal_new128 --num_modes 128 --compute_device cuda --num_shards 2 --shard_index 0 --checkpoint_every 100
+python -m scripts.build_modal_features_multi_gpu --gpus 0,1 --processed_root ../datasets/processed --out_dir ../datasets/modal_features/processed_modal_new128 --num_modes 128 --checkpoint_every 100
 ```
 
-Terminal 2:
+The Python launcher starts two child processes concurrently, assigns one GPU
+to each, and gives each process alternating items from the same sorted WAV
+list. Each writes to `shard_0` or `shard_1`. The launcher waits for both and
+then runs the metadata merge automatically. The one terminal shows status;
+per-shard detail is in `shard_0.log` and `shard_1.log` under `--out_dir`.
 
-```bash
-CUDA_VISIBLE_DEVICES=1 python -m scripts.build_modal_features_new --processed_root ../datasets/processed --out_dir ../datasets/modal_features/processed_modal_new128 --num_modes 128 --compute_device cuda --num_shards 2 --shard_index 1 --checkpoint_every 100
-```
-
-If one process stops, rerun **its own command** with `--resume`. The checkpoint
-records completed files every 100 new files and at clean exit. A crash may
-therefore recompute at most the files since the last checkpoint. If CUDA runs
+If a run stops, repeat the **same single command** with `--resume`. The
+checkpoint records completed files every 100 new files and at clean exit. A
+crash may therefore recompute files since the last checkpoint. If CUDA runs
 out of memory, restart with `--gpu_cqt_batch_size 8` and a **new output
-directory**: resume refuses changed analysis settings.
+directory**: resume refuses changed analysis settings. To inspect the two
+worker commands without starting them, append `--dry_run`.
 
-## 4. Merge and use the dataset
+## 4. Use the merged dataset
 
-After both shards finish without failed files:
-
-```bash
-python -m scripts.merge_modal_shards --out_dir ../datasets/modal_features/processed_modal_new128 --num_shards 2
-```
-
-The merge checks both configurations, every referenced file, and whether all
-current processed WAVs appear exactly once. It writes the root `metadata.json`
-with `shard_0/...` and `shard_1/...` paths. It does not copy the audio or feature
-files. The training dataset can use this root directory directly; set its
-expected mode count to 128. Do not remove either shard directory after merging.
+The automatic merge checks both configurations, every referenced file, and
+whether all current processed WAVs appear exactly once. It writes the root
+`metadata.json` with `shard_0/...` and `shard_1/...` paths. It does not copy
+the audio or feature files. The training dataset can use this root directory
+directly; set its expected mode count to 128. Keep both shard directories.
 
 The original CPU path remains `python -m scripts.build_modal_features_new`
 without `--compute_device cuda`. GPU output may differ slightly from CPU output
