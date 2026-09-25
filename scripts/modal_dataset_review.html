@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modal extraction review</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { max-width: 1500px; margin: auto; padding: 1.5rem; background: #151a20; color: #edf2f7; }
+    h1 { margin-bottom: .4rem; } p { line-height: 1.5; }
+    .muted { color: #b7c5d0; }
+    .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; padding: 1rem;
+      background: #26303c; border-radius: .8rem; }
+    button, select, input { font: inherit; }
+    button, select { color: inherit; background: #354354; border: 1px solid #72869a;
+      border-radius: .4rem; padding: .5rem .7rem; }
+    button { cursor: pointer; } button:disabled { opacity: .5; cursor: progress; }
+    button:hover:enabled { background: #49627b; }
+    button:focus-visible, select:focus-visible { outline: 3px solid #76dae8; }
+    .sample-name { overflow-wrap: anywhere; color: #aee8ef; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
+    .card { background: #25303b; padding: 1rem; border-radius: .7rem; }
+    .card strong { display: block; margin-bottom: .2rem; } .card small { display: block; min-height: 2.5em; }
+    audio { width: 100%; margin-top: .7rem; }
+    .controls { display: flex; gap: 1.3rem; flex-wrap: wrap; margin: 1.2rem 0; }
+    .controls label { display: flex; align-items: center; gap: .4rem; cursor: pointer; }
+    .legend { line-height: 1.55; background: #222a34; padding: 1rem; border-radius: .6rem; }
+    .plots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+    .panel { background: #222a34; border-radius: .6rem; padding: .45rem; min-width: 0; }
+    .panel h3 { margin: .2rem .5rem .5rem; }
+    .layers { position: relative; width: 100%; }
+    .layers img { display: block; width: 100%; height: auto; }
+    .layers .overlay { position: absolute; inset: 0; pointer-events: none; }
+    .overlay[hidden] { display: none; }
+    @media (max-width: 850px) { .plots { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <h1>Modal extraction review</h1>
+  <p class="muted">Original과 세 modal branch를 같은 sample에서 비교한다. Random 버튼을 누를 때 Legacy와 NEW는 다시 분석하고, FAST는 저장된 feature를 읽는다.</p>
+  <div class="toolbar">
+    <label>Pack <select id="pack"><option value="">전체</option></select></label>
+    <button id="random" type="button">Random sample 새로 뽑기</button>
+    <label>Sample ID <input id="sample-id" inputmode="numeric" size="17" placeholder="metadata ID"></label>
+    <button id="load-id" type="button">이 ID 다시 분석</button>
+    <span id="status" role="status" class="muted">준비 중…</span>
+  </div>
+  <h2 id="name" class="sample-name">아직 선택된 sample 없음</h2>
+  <p id="details" class="muted"></p>
+  <div class="cards">
+    <div class="card"><strong>① Original</strong><small>FAST 분석에 사용한 preprocessed WAV</small><audio id="audio-original" controls preload="none"></audio></div>
+    <div class="card"><strong>② Legacy modal</strong><small>현재 modal_analysis.py + padding repair가 적용된 ModalSynth</small><audio id="audio-legacy" controls preload="none"></audio></div>
+    <div class="card"><strong>③ NEW modal</strong><small>전체 정밀 설정으로 매번 다시 분석</small><audio id="audio-new" controls preload="none"></audio></div>
+    <div class="card"><strong>④ FAST modal</strong><small>서버에 이미 저장된 PT를 그대로 합성</small><audio id="audio-fast" controls preload="none"></audio></div>
+  </div>
+  <div class="legend">
+    <b>그림 읽기:</b> 각 행은 위 소리와 같다. 왼쪽은 전 대역을 긴 STFT로 계산한 mel frequency 축으로 저역을 더 크게 보여준다. 오른쪽은 짧은 STFT의 전 대역 linear frequency 축으로 transient와 고역을 본다. 두 그림 모두 <em>표시용</em>이다. 추출 자체는 LF CQT와 long/short STFT를 함께 사용한다. 각 열의 색은 Original의 최대 STFT 크기를 0 dB로 두고 −80~0 dB로 고정했다. 관측 선은 선택된 mode에서 실제 peak가 있었던 frame만 이으며, 빈 frame을 가로질러 연결하지 않는다.
+  </div>
+  <div class="controls">
+    <label><input id="show-new" type="checkbox"> Original 위 NEW observed 표시 <span style="color:cyan">●</span></label>
+    <label><input id="show-fast" type="checkbox"> Original 위 FAST observed 표시 <span style="color:lime">●</span></label>
+  </div>
+  <div class="plots" id="plots"></div>
+  <script>
+    const names = ["original", "legacy", "new", "fast"];
+    const scales = ["mel", "linear"];
+    const status = document.querySelector("#status");
+    const plots = document.querySelector("#plots");
+    let busy = false;
+    let current = null;
+
+    for (const name of names) {
+      for (const scale of scales) {
+        const panel = document.createElement("section");
+        panel.className = "panel";
+        panel.innerHTML = `<h3>${name.toUpperCase()} · ${scale} axis</h3><div class="layers">
+          <img data-plot="${name}_${scale}" alt="${name} ${scale} spectrogram">
+          ${name === "original" ? `<img class="overlay" data-overlay="observed_new_${scale}" hidden alt="NEW observed tracks"><img class="overlay" data-overlay="observed_fast_${scale}" hidden alt="FAST observed tracks">` : ""}
+          </div>`;
+        plots.append(panel);
+      }
+    }
+
+    function updateOverlays() {
+      document.querySelectorAll('[data-overlay^="observed_new_"]').forEach(img => {
+        img.hidden = !document.querySelector("#show-new").checked;
+      });
+      document.querySelectorAll('[data-overlay^="observed_fast_"]').forEach(img => {
+        img.hidden = !document.querySelector("#show-fast").checked;
+      });
+    }
+    document.querySelector("#show-new").addEventListener("change", updateOverlays);
+    document.querySelector("#show-fast").addEventListener("change", updateOverlays);
+
+    async function load(url) {
+      if (busy) return;
+      busy = true;
+      document.querySelector("#random").disabled = true;
+      document.querySelector("#load-id").disabled = true;
+      status.textContent = "분석 및 그림 생성 중… 긴 sample은 시간이 걸릴 수 있어.";
+      try {
+        const response = await fetch(url, {cache: "no-store"});
+        const report = await response.json();
+        if (!response.ok) throw new Error(report.error || `HTTP ${response.status}`);
+        current = report;
+        document.querySelector("#sample-id").value = report.id;
+        document.querySelector("#name").textContent = report.name;
+        document.querySelector("#details").textContent =
+          `${report.pack} · ${report.duration_seconds}s · Legacy ${report.legacy_modes} modes (${report.legacy_seconds}s) · NEW ${report.new_modes} modes (${report.new_seconds}s) · FAST ${report.fast_modes} modes (저장 당시 ${report.fast_saved_seconds}s, LF ${report.fast_lf_modes}, HF ${report.fast_hf_modes})`;
+        for (const name of names) {
+          const audio = document.querySelector(`#audio-${name}`);
+          audio.pause();
+          audio.src = report.media + name + ".wav";
+          audio.load();
+          for (const scale of scales) {
+            document.querySelector(`[data-plot="${name}_${scale}"]`).src =
+              report.media + `${name}_${scale}.png`;
+          }
+        }
+        for (const scale of scales) {
+          for (const method of ["new", "fast"]) {
+            document.querySelector(`[data-overlay="observed_${method}_${scale}"]`).src =
+              report.media + `observed_${method}_${scale}.png`;
+          }
+        }
+        updateOverlays();
+        history.replaceState(null, "", `?id=${encodeURIComponent(report.id)}`);
+        status.textContent = "완료. Random 버튼은 다른 sample을 다시 뽑아 분석해.";
+      } catch (error) {
+        status.textContent = `오류: ${error.message}`;
+      } finally {
+        busy = false;
+        document.querySelector("#random").disabled = false;
+        document.querySelector("#load-id").disabled = false;
+      }
+    }
+
+    document.querySelector("#random").addEventListener("click", () => {
+      const pack = document.querySelector("#pack").value;
+      const query = new URLSearchParams();
+      if (pack) query.set("pack", pack);
+      if (current) query.set("exclude", current.id);
+      load("/api/random?" + query.toString());
+    });
+    document.querySelector("#load-id").addEventListener("click", () => {
+      const id = document.querySelector("#sample-id").value.trim();
+      if (id) load(`/api/sample?id=${encodeURIComponent(id)}`);
+    });
+    document.querySelector("#sample-id").addEventListener("keydown", event => {
+      if (event.key === "Enter") document.querySelector("#load-id").click();
+    });
+    fetch("/api/info").then(response => response.json()).then(info => {
+      const selector = document.querySelector("#pack");
+      for (const pack of info.packs) selector.add(new Option(pack, pack));
+      const id = new URLSearchParams(location.search).get("id");
+      status.textContent = `${info.count} samples 준비됨.`;
+      if (id) load(`/api/sample?id=${encodeURIComponent(id)}`);
+    }).catch(error => { status.textContent = `초기화 오류: ${error.message}`; });
+  </script>
+</body>
+</html>
