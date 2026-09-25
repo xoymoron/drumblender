@@ -1,5 +1,8 @@
 # Raw audio preprocessing
 
+Raw samples live in `../rawdata`; the preprocessed WAVs live in
+`../dataset/processed`. Both paths are relative to the repository root.
+
 Run these commands from the repository root after installing the project
 dependencies on the server. The script also supports direct execution from any
 working directory using its absolute path. It does not install packages or
@@ -8,7 +11,7 @@ modify environments.
 ## Raw audio preprocessing
 
 ```bash
-python scripts/preprocess_datasets_pure.py --input /data/rawdata --output /data/processed --rejected /data/rejected --logs /data/logs --device cpu
+python scripts/preprocess_datasets_pure.py --input ../rawdata --output ../dataset/processed --rejected ../dataset/rejected --logs ../dataset/logs --device cpu
 ```
 
 Use separate, non-overlapping directories. Pack/subfolder paths are preserved.

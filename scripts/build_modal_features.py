@@ -5,12 +5,19 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from time import monotonic, perf_counter
 from typing import Dict, List, Tuple
 
 import torch
 import torchaudio
 from tqdm import tqdm
 import math
+
+from scripts.modal_extraction_stats import (
+    result_details,
+    summarize_metadata,
+    write_json_atomic,
+)
 
 
 def stable_id(rel_path: str) -> str:
@@ -174,12 +181,22 @@ def parse_args(argv=None, default_backend="legacy"):
         action="store_true",
         help="Disable complex-lobe fitting and phase frequency refinement in NEW.",
     )
+    ap.add_argument(
+        "--fast",
+        action="store_true",
+        help="NEW only: use a 16 ms grid and skip costly peak refinement.",
+    )
 
     # behavior
     ap.add_argument("--seed", type=int, default=5152845)
     ap.add_argument("--max_files", type=int, default=0, help="0 = all files")
     ap.add_argument("--num_shards", type=int, default=1)
     ap.add_argument("--shard_index", type=int, default=0)
+    ap.add_argument(
+        "--no_tqdm",
+        action="store_true",
+        help="Hide the worker bar when a multi-GPU parent displays shard bars.",
+    )
     ap.add_argument(
         "--resume",
         action="store_true",
@@ -239,6 +256,14 @@ def parse_args(argv=None, default_backend="legacy"):
     )
     args = ap.parse_args(argv)
     is_new = args.modal_backend != "legacy"
+    if args.fast:
+        if not is_new:
+            ap.error("--fast is only supported by the NEW analyzer")
+        args.hop_length = 768
+        args.no_refine = True
+        # One fast frame spans the old three-frame gap budget (16 ms).
+        # Avoid joining unrelated peaks across a 48 ms silent interval.
+        args.max_gap = 0
     if args.num_modes is None:
         args.num_modes = 128 if is_new else 64
     if args.min_length is None:
@@ -258,14 +283,14 @@ def parse_args(argv=None, default_backend="legacy"):
     if not is_new and args.compute_device != "cpu":
         ap.error("--compute_device cuda is only supported by the NEW analyzer")
     if args.processed_root is None:
-        args.processed_root = (
-            "../datasets/processed" if is_new else "../samples/processed"
-        )
+        args.processed_root = "../dataset/processed"
     if args.out_dir is None:
         directory = (
-            f"processed_modal_new{args.num_modes}" if is_new else "processed_modal_flat"
+            f"processed_modal_{'fast' if args.fast else 'new'}{args.num_modes}"
+            if is_new
+            else "processed_modal_flat"
         )
-        args.out_dir = str(Path("../datasets/modal_features") / directory)
+        args.out_dir = str(Path("../dataset/modal_features") / directory)
     if args.num_shards > 1:
         args.out_dir = str(Path(args.out_dir) / f"shard_{args.shard_index}")
     return args
@@ -286,12 +311,13 @@ def main(default_backend="legacy"):
     if args.resume and config_path.exists():
         previous = json.loads(config_path.read_text(encoding="utf-8"))
         for name, value in vars(args).items():
+            previous_value = previous.get(name, False if name == "fast" else None)
             if (
-                name not in {"resume", "checkpoint_every", "max_files"}
-                and previous.get(name) != value
+                name not in {"resume", "checkpoint_every", "max_files", "no_tqdm"}
+                and previous_value != value
             ):
                 raise ValueError(
-                    f"Cannot resume with changed {name}: {previous.get(name)!r} != {value!r}"
+                    f"Cannot resume with changed {name}: {previous_value!r} != {value!r}"
                 )
     elif args.resume and meta_path.exists():
         raise ValueError("Cannot resume metadata without modal_config.json.")
@@ -349,6 +375,7 @@ def main(default_backend="legacy"):
             min_relative_score_db=args.min_relative_score_db,
             min_prominence_db=args.min_prominence_db,
             refine=not args.no_refine,
+            fast=args.fast,
             compute_device=args.compute_device,
             gpu_cqt_batch_size=args.gpu_cqt_batch_size,
         )
@@ -378,12 +405,61 @@ def main(default_backend="legacy"):
     failed = 0
     kept = 0
     skipped = 0
+    attempted = 0
+    run_started = monotonic()
+    last_progress_write = 0.0
+    progress_path = out_dir / "progress.json"
+    summary_path = out_dir / "run_stats.json"
+    failures_path = out_dir / "failures.jsonl"
+
+    def write_progress(last: dict | None = None, *, force: bool = False) -> None:
+        nonlocal last_progress_write
+        now = monotonic()
+        if not force and now - last_progress_write < 0.5:
+            return
+        elapsed = max(now - run_started, 1e-6)
+        write_json_atomic(
+            progress_path,
+            {
+                "device": args.compute_device,
+                "shard_index": args.shard_index,
+                "total": len(wavs),
+                "attempted": attempted,
+                "kept": kept,
+                "skipped": skipped,
+                "failed": failed,
+                "elapsed_seconds": round(elapsed, 3),
+                "files_per_second": round(attempted / elapsed, 4),
+                "estimated_remaining_seconds": (
+                    round((len(wavs) - attempted) * elapsed / attempted, 1)
+                    if attempted
+                    else None
+                ),
+                "last": last,
+            },
+        )
+        last_progress_write = now
 
     def save_metadata() -> None:
         # A replace keeps a usable checkpoint if the process stops mid-write.
-        temporary = meta_path.with_name(meta_path.name + ".tmp")
-        temporary.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(meta_path)
+        write_json_atomic(meta_path, meta)
+        write_json_atomic(
+            summary_path,
+            {
+                "run": {
+                    "device": args.compute_device,
+                    "shard_index": args.shard_index,
+                    "total": len(wavs),
+                    "attempted": attempted,
+                    "new": kept,
+                    "resumed": skipped,
+                    "failed": failed,
+                    "elapsed_seconds": round(monotonic() - run_started, 3),
+                },
+                "completed": summarize_metadata(meta, args.num_modes, args.sample_rate),
+            },
+            indent=2,
+        )
 
     def right_pad_to(w: torch.Tensor, target: int) -> torch.Tensor:
         t = int(w.shape[-1])
@@ -395,31 +471,41 @@ def main(default_backend="legacy"):
         # Legacy fallback for analyzers that cannot return an empty mode tensor.
         return max(1, math.ceil(T / hop))
 
-    def extract_feat(w: torch.Tensor) -> torch.Tensor:
+    def extract_feat(w: torch.Tensor):
         """
         returns feat: (3, M, F)  where M can be 0..num_modes
         if M==0, return zeros (3, 0, F) instead of crashing.
         """
+        result = None
         try:
-            modal_freqs, modal_amps, modal_phases = modal(w)  # expected (1, M, F)
+            if is_new:
+                # Keep NEW's observation masks, gate counts, and stage timings
+                # for diagnostics; __call__ returns only the three parameters.
+                result = modal.analyze(w[0].numpy())
+                modal_freqs, modal_amps, modal_phases = (
+                    torch.from_numpy(values)[None]
+                    for values in result.parameters()
+                )
+            else:
+                modal_freqs, modal_amps, modal_phases = modal(w)
         except RuntimeError as e:
             msg = str(e)
             # Older analyzers stack an empty list when no mode survives.
             if "non-empty TensorList" in msg:
                 F = num_frames_from_len(int(w.shape[-1]), args.hop_length)
                 z = w.new_zeros((3, 0, F))
-                return z
+                return z, None
             raise
 
         # Preserve the analyzer's exact frame grid, including silent NEW input.
         if modal_freqs.numel() == 0 or modal_freqs.shape[1] == 0:
             F = modal_freqs.shape[-1]
-            return w.new_zeros((3, 0, F))
+            return w.new_zeros((3, 0, F)), result
 
         modal_freqs = 2 * torch.pi * modal_freqs / args.sample_rate
         feat = torch.stack([modal_freqs, modal_amps, modal_phases])  # (3,1,M,F)
         feat = feat.squeeze(1)  # (3,M,F)
-        return feat
+        return feat, result
 
     def infer_required_length_from_padding_error(msg: str, current_len: int) -> int:
         # Parse nnAudio/torch padding errors and choose a safe retry length.
@@ -433,25 +519,31 @@ def main(default_backend="legacy"):
         return max(current_len + 1, current_len * 2)
 
     pbar = tqdm(
-        list(zip(wavs, typed)),
+        zip(wavs, typed),
         total=len(wavs),
-        desc="modal",
+        desc=f"modal {args.compute_device} {args.shard_index + 1}/{args.num_shards}",
         unit="file",
         dynamic_ncols=True,
+        disable=args.no_tqdm,
     )
+    write_progress(force=True)
 
     for idx, (wav_path, (type_name, inst_name, pack)) in enumerate(pbar):
         rel = wav_path.relative_to(processed_root)
         key = stable_id(str(rel))
+        file_started = perf_counter()
         if args.resume and key in meta:
             existing = meta[key]
             if (out_dir / existing["filename"]).is_file() and (
                 out_dir / existing["feature_file"]
             ).is_file():
                 skipped += 1
+                attempted += 1
+                write_progress({"source": str(rel), "status": "resumed"})
                 pbar.set_postfix(kept=kept, skipped=skipped, failed=failed)
                 continue
 
+        last = {"source": str(rel), "status": "failed"}
         try:
             wav, sr = torchaudio.load(str(wav_path))  # [C,T]
             if wav.ndim != 2:
@@ -482,7 +574,7 @@ def main(default_backend="legacy"):
 
             # extract with retry for reflect padding errors from CQT
             try:
-                feat = extract_feat(wav)
+                feat, result = extract_feat(wav)
             except RuntimeError as e:
                 msg = str(e)
                 if (not args.pad_short) or (
@@ -497,7 +589,7 @@ def main(default_backend="legacy"):
                     msg, int(wav.shape[-1])
                 )
                 wav_try = right_pad_to(wav, target)
-                feat = extract_feat(wav_try)
+                feat, result = extract_feat(wav_try)
 
             # force fixed num_modes
             p, m, f = feat.shape
@@ -526,27 +618,58 @@ def main(default_backend="legacy"):
                 "modal_slots": args.num_modes,
                 "active_modes": active_modes,
             }
+            if result is not None:
+                meta_item.update(result_details(result, args.cqt_max_frequency))
+            meta_item["file_seconds"] = round(perf_counter() - file_started, 6)
             if split_by_index is not None:
                 meta_item["split"] = split_by_index[idx]
             meta[key] = meta_item
 
             kept += 1
-            if kept % args.checkpoint_every == 0:
-                save_metadata()
-
+            last = {
+                "source": str(rel),
+                "status": "completed",
+                "modes": active_modes,
+                "lf_modes": meta_item.get("modal_lf_modes"),
+                "hf_modes": meta_item.get("modal_hf_modes"),
+                "candidates": meta_item.get("modal_candidates_pre_limit"),
+                "seconds": meta_item["file_seconds"],
+            }
         except Exception as e:
             failed += 1
-            print("fail:", str(rel), "->", repr(e))
+            last["error"] = repr(e)
+            with failures_path.open("a", encoding="utf-8") as failure_log:
+                failure_log.write(json.dumps(last, ensure_ascii=False) + "\n")
+            tqdm.write(f"fail: {rel} -> {e!r}")
 
-        pbar.set_postfix(kept=kept, skipped=skipped, failed=failed)
+        attempted += 1
+        write_progress(last)
+        if kept and kept % args.checkpoint_every == 0 and last["status"] == "completed":
+            save_metadata()
+        pbar.set_postfix(
+            kept=kept,
+            skipped=skipped,
+            failed=failed,
+            modes=last.get("modes", "-"),
+            lf=last.get("lf_modes", "-"),
+            hf=last.get("hf_modes", "-"),
+            candidates=last.get("candidates", "-"),
+            sec=last.get("seconds", "-"),
+        )
 
     save_metadata()
+    write_progress(force=True)
 
     print(
         "[done] total:", len(meta), "new:", kept, "skipped:", skipped, "failed:", failed
     )
+    print("stats:", summary_path)
     print("out_dir:", out_dir)
     print("meta:", meta_path)
+    if failed:
+        raise RuntimeError(
+            f"{failed} file(s) failed; inspect {failures_path} and rerun with --resume."
+        )
 
 
 if __name__ == "__main__":

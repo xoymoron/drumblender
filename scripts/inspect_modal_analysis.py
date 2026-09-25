@@ -64,14 +64,15 @@ def write_html(output, summaries):
         safe_directory = html.escape(directory, quote=True)
         options.append(f'<option value="{safe_directory}">{safe_name}</option>')
         players = []
+        modal_label = "FAST modal" if summary.get("fast") else "NEW modal"
         for label, filename, description in [
             ("① Original", "original", "분석기에 넣은 원본 WAV"),
             ("② Legacy modal", "legacy", "기존 CQT 분석기로 얻은 modal branch만 합성"),
-            ("③ NEW modal", "modal", "새 hybrid 분석기로 얻은 modal branch만 합성"),
+            (f"③ {modal_label}", "modal", "선택한 분석기로 얻은 modal branch만 합성"),
             (
                 "④ Residual",
                 "residual",
-                "Original − NEW modal: 현재 waveform에서 뺀 잔차",
+                f"Original − {modal_label}: 현재 waveform에서 뺀 잔차",
             ),
         ]:
             if filename == "legacy" and "legacy" not in summary:
@@ -92,7 +93,7 @@ def write_html(output, summaries):
             f'<section class="sample" data-sample="{safe_directory}" hidden>'
             f"<h2>{safe_name}</h2>"
             f'<p class="meta">오디오 {summary["duration_seconds"]:.2f}초 · '
-            f'NEW {summary["modes"]}개 / {summary["analysis_seconds"]:.2f}초{old_info}</p>'
+            f'{modal_label} {summary["modes"]}개 / {summary["analysis_seconds"]:.2f}초{old_info}</p>'
             f'<div class="audio-grid">{"".join(players)}</div>'
             f'<img class="plot" data-source="{plot}" src="{plot}" '
             'alt="원본, 기존 modal, NEW modal, 잔차의 LF 및 full-band spectrogram">'
@@ -263,6 +264,9 @@ def inspect_file(source, output, args):
         min_length=args.min_length,
         min_relative_score_db=args.min_relative_score_db,
         refine=not args.no_refine,
+        hop_length=768 if args.fast else 256,
+        max_gap=0 if args.fast else 2,
+        fast=args.fast,
         compute_device=args.compute_device,
         gpu_cqt_batch_size=args.gpu_cqt_batch_size,
     )
@@ -301,6 +305,8 @@ def inspect_file(source, output, args):
         duration_seconds=duration,
         backend=args.backend,
         compute_device=args.compute_device,
+        fast=args.fast,
+        analysis_stage_seconds=result.stage_seconds,
         mode_limit=args.num_modes,
         modes=len(result.frequencies),
         candidates_before_limit=result.candidates_before_limit,
@@ -331,7 +337,7 @@ def main():
         "inputs", nargs="*", type=Path, help="Mono WAV files or directories."
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("analysis/modal_new_review")
+        "--output", type=Path, default=None
     )
     parser.add_argument(
         "--backend", choices=("hybrid", "stft", "cqt"), default="hybrid"
@@ -342,6 +348,7 @@ def main():
     parser.add_argument("--compute_device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--gpu_cqt_batch_size", type=int, default=16)
     parser.add_argument("--no_refine", action="store_true")
+    parser.add_argument("--fast", action="store_true", help="Review the 16 ms fast preset.")
     parser.add_argument("--compare_legacy", action="store_true")
     parser.add_argument("--legacy_modes", type=int, default=64)
     parser.add_argument("--max_files", type=int, default=8)
@@ -351,6 +358,12 @@ def main():
         help="Rebuild HTML from existing summary.json without reanalyzing audio.",
     )
     args = parser.parse_args()
+    if args.output is None:
+        args.output = Path(
+            "analysis/modal_fast_review" if args.fast else "analysis/modal_new_review"
+        )
+    if args.fast:
+        args.no_refine = True
     if args.refresh_html:
         summaries = json.loads(
             (args.output / "summary.json").read_text(encoding="utf-8")

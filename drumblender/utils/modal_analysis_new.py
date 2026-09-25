@@ -40,6 +40,7 @@ class ModalAnalysisResult:
     candidates_before_limit: int
     analysis_seconds: float = 0.0
     candidates_before_score_gate: int = 0
+    stage_seconds: dict[str, float] = field(default_factory=dict)
 
     def parameters(self):
         return self.frequencies, self.amplitudes, self.phases
@@ -115,6 +116,7 @@ class CQTModalAnalysis:
         max_peaks: Optional[int] = None,
         frame_block_size: int = 128,
         refine: bool = True,
+        fast: bool = False,
         compute_device: str = "cpu",
         gpu_cqt_batch_size: int = 16,
     ):
@@ -187,6 +189,7 @@ class CQTModalAnalysis:
         self.long_window = long_window
         self.frame_block_size = frame_block_size
         self.refine = refine
+        self.fast = fast
         self.compute_device = compute_device
         self.gpu_cqt_batch_size = gpu_cqt_batch_size
         self.max_peaks = (
@@ -232,6 +235,7 @@ class CQTModalAnalysis:
     def analyze(self, audio) -> ModalAnalysisResult:
         """Analyze a mono waveform and retain masks, sources, and timings."""
         started = perf_counter()
+        stage_seconds = {}
         audio = np.asarray(audio, dtype=np.float32)
         if audio.ndim != 1 or not audio.size or not np.isfinite(audio).all():
             raise ValueError("Expected a nonempty, finite, mono waveform.")
@@ -247,16 +251,29 @@ class CQTModalAnalysis:
         )
         if np.max(np.abs(audio)) > floor:
             if self.backend != "stft":
+                stage_started = perf_counter()
                 self._add_cqt_peaks(audio, centers, floor, frames)
+                stage_seconds["cqt"] = perf_counter() - stage_started
             if self.backend != "cqt":
+                stage_started = perf_counter()
                 self._add_stft_peaks(audio, centers, floor, frames, self.long_window, 1)
+                stage_seconds["long_stft"] = perf_counter() - stage_started
+                stage_started = perf_counter()
                 self._add_stft_peaks(
                     audio, centers, floor, frames, self.short_window, 2
                 )
+                stage_seconds["short_stft"] = perf_counter() - stage_started
+        stage_started = perf_counter()
         frames = [self._merge_peaks(peaks) for peaks in frames]
+        stage_seconds["merge_peaks"] = perf_counter() - stage_started
+        stage_started = perf_counter()
         tracks = self._track_peaks(frames, times)
+        stage_seconds["track_peaks"] = perf_counter() - stage_started
+        stage_started = perf_counter()
         result = self._pack_tracks(tracks, times)
+        stage_seconds["pack_tracks"] = perf_counter() - stage_started
         result.analysis_seconds = perf_counter() - started
+        result.stage_seconds = stage_seconds
         return result
 
     def _add_cqt_peaks(self, audio, centers, floor, frames):
@@ -366,7 +383,7 @@ class CQTModalAnalysis:
             for offset, values in enumerate(spectra):
                 frame = start + offset
                 error = (centers[frame] - locations[offset]) / self.sample_rate
-                if source == 2:
+                if source == 2 and not self.fast:
                     # Fine frequency estimates need not impose a long envelope
                     # window on an isolated, short high-frequency resonance.
                     anchors = self._merge_peaks(frames[frame])
@@ -582,11 +599,24 @@ class CQTModalAnalysis:
                         last[:, FREQUENCY] * self.diff_threshold,
                     ),
                 )
+                # Frequencies are sorted after _merge_peaks. Search only each
+                # track's narrow gate instead of allocating a dense
+                # [active tracks, frame peaks] distance matrix.
+                frequencies = peaks[:, FREQUENCY]
+                lower = np.searchsorted(frequencies, predicted - gate, side="right")
+                upper = np.searchsorted(frequencies, predicted + gate, side="left")
+                counts = upper - lower
+                rows = np.repeat(np.arange(len(active)), counts)
+                columns = np.concatenate(
+                    [
+                        np.arange(begin, end)
+                        for begin, end in zip(lower, upper)
+                        if begin < end
+                    ]
+                ) if rows.size else np.empty(0, dtype=int)
                 distance = (
-                    np.abs(predicted[:, None] - peaks[None, :, FREQUENCY])
-                    / gate[:, None]
+                    np.abs(predicted[rows] - frequencies[columns]) / gate[rows]
                 )
-                rows, columns = np.nonzero(distance < 1)
                 phase_error = _wrap_phase(
                     peaks[columns, PHASE]
                     - last[rows, PHASE]
@@ -596,7 +626,7 @@ class CQTModalAnalysis:
                     * (last[rows, FREQUENCY] + peaks[columns, FREQUENCY])
                     * elapsed[rows]
                 )
-                costs = distance[rows, columns] + 0.1 * np.abs(phase_error) / np.pi
+                costs = distance + 0.1 * np.abs(phase_error) / np.pi
                 # Sort only gated edges. Each observation/track is consumed once.
                 for edge in np.argsort(costs, kind="stable"):
                     row, column = int(rows[edge]), int(columns[edge])

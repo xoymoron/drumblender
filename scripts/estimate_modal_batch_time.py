@@ -20,12 +20,12 @@ from drumblender.utils.modal_analysis_new import CQTModalAnalysis as NewAnalysis
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--processed_root", type=Path, default=Path("../datasets/processed")
+        "--processed_root", type=Path, default=Path("../dataset/processed")
     )
     parser.add_argument(
         "--metadata",
         type=Path,
-        default=Path("../datasets/modal_features/processed_modal_flat/metadata.json"),
+        default=Path("../dataset/modal_features/processed_modal_flat/metadata.json"),
     )
     parser.add_argument("--sample_count", type=int, default=32)
     parser.add_argument("--target_count", type=int, default=17000)

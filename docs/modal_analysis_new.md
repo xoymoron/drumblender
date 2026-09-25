@@ -96,7 +96,7 @@ changed. Rebuild NEW features in a separate output directory and use their
 Also align the data module's `num_modes` and any per-mode parameter bank such as
 `ModalAmpParameters.num_modes`. A checkpoint with a 64-mode learned bank is not
 automatically a compatible 128-mode checkpoint. The NEW builder defaults to
-`../datasets/modal_features/processed_modal_new128`, separate from the legacy path.
+`../dataset/modal_features/processed_modal_new128`, separate from the legacy path.
 
 ## Commands
 
@@ -104,7 +104,7 @@ Run from the repository root in the supported Python 3.10–3.12 environment:
 
 ```bash
 python -m pip install -e ".[modal_new]"
-python -m scripts.build_modal_features_new --processed_root ../datasets/processed --out_dir ../datasets/modal_features/processed_modal_new128 --num_modes 128 --checkpoint_every 100
+python -m scripts.build_modal_features_new --processed_root ../dataset/processed --out_dir ../dataset/modal_features/processed_modal_new128 --num_modes 128 --checkpoint_every 100
 python -m scripts.inspect_modal_analysis path/to/mono_sample.wav --output analysis/modal_review --num_modes 128
 ```
 
@@ -169,7 +169,7 @@ For a full-dataset time estimate from the existing processed WAVs and legacy
 metadata, use:
 
 ```bash
-python -m scripts.estimate_modal_batch_time --processed_root ../datasets/processed --target_count 17000 --sample_count 64
+python -m scripts.estimate_modal_batch_time --processed_root ../dataset/processed --target_count 17000 --sample_count 64
 ```
 
 This times CPU analysis calls, excluding I/O and feature writing. It compares

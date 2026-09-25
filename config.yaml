@@ -139,14 +139,15 @@ data:
     dataset_kwargs:
       seed: 5152845
       parameter_key: feature_file
+      audio_dir: ../dataset/processed
       split_strategy: sample_pack
       expected_num_modes: 64
     url: https://d5d740b2d880827ae0c8f465bf180715.r2.cloudflarestorage.com
     bucket: drum-dataset
     archive: drumblender-percussion-dataset-v1.tar.gz
     meta_file: metadata.json
-    data_dir: /workspace/drumblender/dataset/datasets_pure_flat
-    data_dir_unprocessed: dataset-unprocessed/percussion-dataset
+    data_dir: ../dataset/modal_features/processed_modal_flat
+    data_dir_unprocessed: ../rawdata
     sample_rate: 48000
     skip_prepare_data: true
     num_samples: null

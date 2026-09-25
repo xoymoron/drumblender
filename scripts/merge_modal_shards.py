@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from scripts.build_modal_features import list_wavs, stable_id
+from scripts.modal_extraction_stats import summarize_metadata, write_json_atomic
 
 
 def main():
@@ -76,15 +77,23 @@ def main():
         )
 
     output_metadata = args.out_dir / first_config["meta_name"]
-    temporary = output_metadata.with_name(output_metadata.name + ".tmp")
-    temporary.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(output_metadata)
+    write_json_atomic(output_metadata, merged)
     combined_config = first_config.copy()
     combined_config["out_dir"] = str(args.out_dir)
     combined_config["shard_index"] = None
     combined_config["merged_shards"] = args.num_shards
     (args.out_dir / "modal_config.json").write_text(
         json.dumps(combined_config, indent=2), encoding="utf-8"
+    )
+    write_json_atomic(
+        args.out_dir / "run_stats.json",
+        {
+            "shards": args.num_shards,
+            "completed": summarize_metadata(
+                merged, first_config["num_modes"], first_config["sample_rate"]
+            ),
+        },
+        indent=2,
     )
     print(f"Merged {len(merged)} samples into {output_metadata}")
 
