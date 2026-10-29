@@ -1,5 +1,7 @@
 # Transient-aware noise synthesis와 발견 가능한 latent control
 
+> **2026-10-29 목표 갱신:** [현재 구현 목표](../../research_implementation_goals.md)에서 **A. Joint DSP synthesis**와 **B. Modal-conditioned neural synthesis**를 모두 채택했다. 아래 frozen-modal + complex-texture 두-branch 구조는 과거 제안으로 보존한다. 이 문서의 두 audible branches 유지 결정과 세부 제약은 해당 제안에 한정하며, 새 A/B의 필수 설계가 아니다. 전체 waveform을 생성하는 B와도 구별한다. 아래의 "첫 구현"은 2026-09-25 제안 내부의 순서를 뜻한다.
+
 작성: 2026-09-25. 상태: 연구 설계 제안. 모델 구현·학습·성능 검증 전이다.
 
 ## 1. 결정과 연구 질문

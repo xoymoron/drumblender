@@ -139,6 +139,11 @@ trained noise output. Rebuild only the HTML layout from existing summaries with:
 python -m scripts.inspect_modal_analysis --refresh_html --output analysis/modal_new_review
 ```
 
+The separate [completed dataset viewer](modal_saved_review.md) reads already
+extracted NEW and FAST `.pt` features from their respective server directories.
+Its normal random-sample action does not rerun modal extraction; legacy analysis
+is optional and explicitly requested in that viewer.
+
 `--backend stft` and `--backend cqt` permit frontend comparisons without training.
 Dataset export uses `--modal_backend` for the same choice. `--no_refine` disables
 complex-lobe fitting and phase-based frequency correction. The historical `.txt`

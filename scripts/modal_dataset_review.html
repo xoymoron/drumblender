@@ -6,7 +6,7 @@
   <title>Modal extraction review</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { max-width: 1500px; margin: auto; padding: 1.5rem; background: #151a20; color: #edf2f7; }
+    body { max-width: 1800px; margin: auto; padding: 1.2rem; background: #151a20; color: #edf2f7; }
     h1 { margin-bottom: .4rem; } p { line-height: 1.5; }
     .muted { color: #b7c5d0; }
     .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; padding: 1rem;
@@ -20,45 +20,56 @@
     .sample-name { overflow-wrap: anywhere; color: #aee8ef; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
     .card { background: #25303b; padding: 1rem; border-radius: .7rem; }
-    .card strong { display: block; margin-bottom: .2rem; } .card small { display: block; min-height: 2.5em; }
+    .card strong { display: block; margin-bottom: .2rem; }
+    .card small { display: block; min-height: 2.5em; }
+    .mode-count { display: block; font-size: 2rem; font-weight: 750; line-height: 1.15;
+      margin: .5rem 0; color: #aee8ef; }
+    .card-meta { min-height: 2.6em; color: #cad7df; }
     audio { width: 100%; margin-top: .7rem; }
     .controls { display: flex; gap: 1.3rem; flex-wrap: wrap; margin: 1.2rem 0; }
     .controls label { display: flex; align-items: center; gap: .4rem; cursor: pointer; }
     .legend { line-height: 1.55; background: #222a34; padding: 1rem; border-radius: .6rem; }
-    .plots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
-    .panel { background: #222a34; border-radius: .6rem; padding: .45rem; min-width: 0; }
+    .plots { display: block; }
+    .panel { background: #222a34; border-radius: .6rem; padding: .45rem;
+      margin-bottom: 1rem; min-width: 0; }
+    .panel[hidden] { display: none; }
     .panel h3 { margin: .2rem .5rem .5rem; }
     .layers { position: relative; width: 100%; }
     .layers img { display: block; width: 100%; height: auto; }
     .layers .overlay { position: absolute; inset: 0; pointer-events: none; }
     .overlay[hidden] { display: none; }
-    @media (max-width: 850px) { .plots { grid-template-columns: 1fr; } }
+    .source-legend { display: flex; flex-wrap: wrap; gap: 1rem; margin: .5rem 0; }
   </style>
 </head>
 <body>
   <h1>Modal extraction review</h1>
-  <p class="muted">Original과 세 modal branch를 같은 sample에서 비교한다. Random 버튼을 누를 때 Legacy와 NEW는 다시 분석하고, FAST는 저장된 feature를 읽는다.</p>
+  <p class="muted">완료된 NEW·FAST feature를 그대로 읽어 같은 원본에서 비교한다. Random 버튼은 새 sample의 저장된 파일을 연다. Legacy 분석은 아래에서 요청할 때만 실행한다.</p>
+  <p id="dataset-summary" class="muted">추출 통계 로딩 중…</p>
   <div class="toolbar">
     <label>Pack <select id="pack"><option value="">전체</option></select></label>
     <button id="random" type="button">Random sample 새로 뽑기</button>
     <label>Sample ID <input id="sample-id" inputmode="numeric" size="17" placeholder="metadata ID"></label>
-    <button id="load-id" type="button">이 ID 다시 분석</button>
+    <button id="load-id" type="button">이 ID 표시</button>
     <span id="status" role="status" class="muted">준비 중…</span>
   </div>
   <h2 id="name" class="sample-name">아직 선택된 sample 없음</h2>
   <p id="details" class="muted"></p>
+  <p id="comparison" class="muted"></p>
   <div class="cards">
-    <div class="card"><strong>① Original</strong><small>FAST 분석에 사용한 preprocessed WAV</small><audio id="audio-original" controls preload="none"></audio></div>
-    <div class="card"><strong>② Legacy modal</strong><small>현재 modal_analysis.py + padding repair가 적용된 ModalSynth</small><audio id="audio-legacy" controls preload="none"></audio></div>
-    <div class="card"><strong>③ NEW modal</strong><small>전체 정밀 설정으로 매번 다시 분석</small><audio id="audio-new" controls preload="none"></audio></div>
-    <div class="card"><strong>④ FAST modal</strong><small>서버에 이미 저장된 PT를 그대로 합성</small><audio id="audio-fast" controls preload="none"></audio></div>
+    <div class="card"><strong>① Original</strong><span class="mode-count">원음</span><small>NEW 추출 폴더에 저장된 preprocessed WAV</small><audio id="audio-original" controls preload="none"></audio></div>
+    <div class="card" id="card-legacy" hidden><strong>② Legacy modal</strong><span class="mode-count" id="count-legacy">— modes</span><span class="card-meta" id="meta-legacy"></span><small>선택할 때에만 현재 modal_analysis.py를 실행</small><audio id="audio-legacy" controls preload="none"></audio></div>
+    <div class="card"><strong>③ NEW modal</strong><span class="mode-count" id="count-new">— modes</span><span class="card-meta" id="meta-new"></span><small>완료된 NEW .pt를 로드하고 합성</small><audio id="audio-new" controls preload="none"></audio></div>
+    <div class="card"><strong>④ FAST modal</strong><span class="mode-count" id="count-fast">— modes</span><span class="card-meta" id="meta-fast"></span><small>완료된 FAST .pt를 로드하고 합성</small><audio id="audio-fast" controls preload="none"></audio></div>
   </div>
   <div class="legend">
-    <b>그림 읽기:</b> 각 행은 위 소리와 같다. 왼쪽은 전 대역을 긴 STFT로 계산한 mel frequency 축으로 저역을 더 크게 보여준다. 오른쪽은 짧은 STFT의 전 대역 linear frequency 축으로 transient와 고역을 본다. 두 그림 모두 <em>표시용</em>이다. 추출 자체는 LF CQT와 long/short STFT를 함께 사용한다. 각 열의 색은 Original의 최대 STFT 크기를 0 dB로 두고 −80~0 dB로 고정했다. 관측 선은 선택된 mode에서 실제 peak가 있었던 frame만 이으며, 빈 frame을 가로질러 연결하지 않는다.
+    <b>그림 읽기:</b> 선택한 축으로 네 소리를 화면 너비에 맞춰 표시한다. Mel 보기에는 긴 STFT(8,192 samples)를, linear 보기에는 짧은 STFT(2,048 samples)를 사용한다. 둘 다 <em>표시용</em>이며 mel 보기는 mel filterbank가 아니라 STFT 그림의 frequency 축만 mel로 바꾼 것이다. 추출 자체는 LF CQT와 long/short STFT를 함께 사용한다. 색은 각 보기의 Original 최대 STFT 크기를 0 dB로 두고 −80~0 dB로 고정했다. 관측 선은 실제 peak가 있는 frame만 이으며 빈 frame을 가로질러 연결하지 않는다.
+    <div class="source-legend"><span style="color:#35d8ef">● NEW 관측</span><span style="color:lime">● FAST 관측</span><span>저장된 .pt에는 mode별 CQT/STFT 출처가 없어서 선 색으로 구분하지 않는다. 카드의 출처별 mode 수는 metadata 집계값이다.</span></div>
   </div>
   <div class="controls">
-    <label><input id="show-new" type="checkbox"> Original 위 NEW observed 표시 <span style="color:cyan">●</span></label>
+    <label>Frequency 축 <select id="scale"><option value="mel">Mel · 저역 상세</option><option value="linear">Linear · 고역/어택</option></select></label>
+    <label><input id="show-new" type="checkbox"> Original 위 NEW observed 표시</label>
     <label><input id="show-fast" type="checkbox"> Original 위 FAST observed 표시 <span style="color:lime">●</span></label>
+    <label><input id="include-legacy" type="checkbox"> Legacy도 분석해서 표시 · 추가 계산 필요</label>
   </div>
   <div class="plots" id="plots"></div>
   <script>
@@ -73,6 +84,9 @@
       for (const scale of scales) {
         const panel = document.createElement("section");
         panel.className = "panel";
+        panel.dataset.scale = scale;
+        panel.dataset.method = name;
+        panel.hidden = scale !== "mel";
         panel.innerHTML = `<h3>${name.toUpperCase()} · ${scale} axis</h3><div class="layers">
           <img data-plot="${name}_${scale}" alt="${name} ${scale} spectrogram">
           ${name === "original" ? `<img class="overlay" data-overlay="observed_new_${scale}" hidden alt="NEW observed tracks"><img class="overlay" data-overlay="observed_fast_${scale}" hidden alt="FAST observed tracks">` : ""}
@@ -89,25 +103,66 @@
         img.hidden = !document.querySelector("#show-fast").checked;
       });
     }
+    function updateScale() {
+      const selected = document.querySelector("#scale").value;
+      document.querySelectorAll(".panel").forEach(panel => {
+        panel.hidden = panel.dataset.scale !== selected ||
+          (panel.dataset.method === "legacy" && !showLegacy());
+      });
+      document.querySelector("#card-legacy").hidden = !showLegacy();
+    }
+    function showLegacy() {
+      return Boolean(current?.legacy_included && document.querySelector("#include-legacy").checked);
+    }
+    document.querySelector("#scale").addEventListener("change", updateScale);
     document.querySelector("#show-new").addEventListener("change", updateOverlays);
     document.querySelector("#show-fast").addEventListener("change", updateOverlays);
+    document.querySelector("#include-legacy").addEventListener("change", () => {
+      if (document.querySelector("#include-legacy").checked && current && !current.legacy_included) {
+        load(`/api/sample?id=${encodeURIComponent(current.id)}`);
+      } else {
+        updateScale();
+      }
+    });
 
     async function load(url) {
       if (busy) return;
       busy = true;
       document.querySelector("#random").disabled = true;
       document.querySelector("#load-id").disabled = true;
-      status.textContent = "분석 및 그림 생성 중… 긴 sample은 시간이 걸릴 수 있어.";
+      status.textContent = "저장된 feature를 합성하고 그림을 만드는 중…";
       try {
-        const response = await fetch(url, {cache: "no-store"});
+        const request = new URL(url, location.origin);
+        if (document.querySelector("#include-legacy").checked) request.searchParams.set("legacy", "1");
+        const response = await fetch(request, {cache: "no-store"});
         const report = await response.json();
         if (!response.ok) throw new Error(report.error || `HTTP ${response.status}`);
         current = report;
         document.querySelector("#sample-id").value = report.id;
         document.querySelector("#name").textContent = report.name;
         document.querySelector("#details").textContent =
-          `${report.pack} · ${report.duration_seconds}s · Legacy ${report.legacy_modes} modes (${report.legacy_seconds}s) · NEW ${report.new_modes} modes (${report.new_seconds}s) · FAST ${report.fast_modes} modes (저장 당시 ${report.fast_saved_seconds}s, LF ${report.fast_lf_modes}, HF ${report.fast_hf_modes})`;
+          `${report.pack} · ${report.duration_seconds}s · ${report.lf_hf_boundary_hz} Hz 기준 LF/HF`;
+        if (report.legacy_included) {
+          document.querySelector("#count-legacy").textContent = `${report.legacy_modes} modes`;
+          document.querySelector("#meta-legacy").textContent = `추가 분석 ${report.legacy_seconds}s`;
+        }
+        document.querySelector("#count-new").textContent = `${report.new_modes} modes`;
+        document.querySelector("#count-fast").textContent = `${report.fast_modes} modes`;
+        document.querySelector("#meta-new").textContent =
+          `LF ${report.new_lf_modes} · HF ${report.new_hf_modes} · 관측 frame ${report.new_observed_frames} · 평균 confidence ${Number(report.new_mean_confidence).toFixed(2)} · ` +
+          `후보 ${report.new_candidates} · 상한 탈락 ${report.new_limit_rejected} · 저장 당시 ${report.new_saved_seconds}s · 출처: ${sourceCounts(report.new_sources)}`;
+        document.querySelector("#meta-fast").textContent =
+          `LF ${report.fast_lf_modes} · HF ${report.fast_hf_modes} · 관측 frame ${report.fast_observed_frames} · 평균 confidence ${Number(report.fast_mean_confidence).toFixed(2)} · ` +
+          `후보 ${report.fast_candidates} · 상한 탈락 ${report.fast_limit_rejected} · 저장 당시 ${report.fast_saved_seconds}s · 출처: ${sourceCounts(report.fast_sources)}`;
+        const modeDelta = report.new_modes - report.fast_modes;
+        const savedRatio = Number(report.new_saved_seconds) / Number(report.fast_saved_seconds);
+        document.querySelector("#comparison").textContent =
+          `이 sample: NEW ${modeDelta >= 0 ? "+" : ""}${modeDelta} modes (FAST 대비) · ` +
+          `LF ${report.new_lf_modes - report.fast_lf_modes >= 0 ? "+" : ""}${report.new_lf_modes - report.fast_lf_modes}, ` +
+          `HF ${report.new_hf_modes - report.fast_hf_modes >= 0 ? "+" : ""}${report.new_hf_modes - report.fast_hf_modes}` +
+          (Number.isFinite(savedRatio) && savedRatio > 0 ? ` · 저장된 분석 시간 비 ${savedRatio.toFixed(1)}×` : "");
         for (const name of names) {
+          if (name === "legacy" && !report.legacy_included) continue;
           const audio = document.querySelector(`#audio-${name}`);
           audio.pause();
           audio.src = report.media + name + ".wav";
@@ -124,8 +179,9 @@
           }
         }
         updateOverlays();
+        updateScale();
         history.replaceState(null, "", `?id=${encodeURIComponent(report.id)}`);
-        status.textContent = "완료. Random 버튼은 다른 sample을 다시 뽑아 분석해.";
+        status.textContent = "완료. Random은 다른 sample의 저장된 결과를 연다.";
       } catch (error) {
         status.textContent = `오류: ${error.message}`;
       } finally {
@@ -133,6 +189,19 @@
         document.querySelector("#random").disabled = false;
         document.querySelector("#load-id").disabled = false;
       }
+    }
+
+    function sourceCounts(sources) {
+      return `CQT ${sources.cqt || 0}, long ${sources.long_stft || 0}, short ${sources.short_stft || 0}, long+short ${sources.long_stft_short_envelope || 0}`;
+    }
+
+    function summaryLine(name, summary) {
+      const percent = summary.files ? (100 * summary.capped_files / summary.files).toFixed(1) : "0";
+      const time = summary.wall_seconds == null ? "총 처리 시간 미제공" :
+        `총 처리 ${(summary.wall_seconds / 3600).toFixed(2)}h`;
+      return `${name}: ${summary.files}개 · 평균 ${summary.mean_modes} modes · ` +
+        `LF ${summary.lf_modes} / HF ${summary.hf_modes} · ` +
+        `${summary.mode_ceiling} 상한 ${summary.capped_files}개 (${percent}%) · ${time}`;
     }
 
     document.querySelector("#random").addEventListener("click", () => {
@@ -152,6 +221,8 @@
     fetch("/api/info").then(response => response.json()).then(info => {
       const selector = document.querySelector("#pack");
       for (const pack of info.packs) selector.add(new Option(pack, pack));
+      document.querySelector("#dataset-summary").textContent =
+        `${summaryLine("NEW", info.new_summary)}  |  ${summaryLine("FAST", info.fast_summary)}  |  공통 ${info.count}개`;
       const id = new URLSearchParams(location.search).get("id");
       status.textContent = `${info.count} samples 준비됨.`;
       if (id) load(`/api/sample?id=${encodeURIComponent(id)}`);

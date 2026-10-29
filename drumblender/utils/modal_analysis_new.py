@@ -12,7 +12,6 @@ from typing import Optional
 
 import numpy as np
 from scipy import fft, signal
-from scipy.ndimage import median_filter
 
 # Peak columns. Phase is the cosine phase at the analysis frame center.
 FREQUENCY, AMPLITUDE, PHASE, BANDWIDTH, CONFIDENCE, SOURCE = range(6)
@@ -444,8 +443,16 @@ class CQTModalAnalysis:
         )
         if not len(indices):
             return np.empty((0, 6), np.float32)
-        background = median_filter(log_magnitude, size=self.p_kernel, mode="nearest")
-        contrast = log_magnitude[indices] - background[indices]
+        # Only candidate peaks consume the background estimate. Computing the
+        # same odd-width median at those locations avoids filtering every bin.
+        radius = self.p_kernel // 2
+        neighbors = np.clip(
+            indices[:, None] + np.arange(-radius, radius + 1),
+            0,
+            len(log_magnitude) - 1,
+        )
+        background = np.median(log_magnitude[neighbors], axis=1)
+        contrast = log_magnitude[indices] - background
         keep = contrast >= self.min_prominence_db
         indices, contrast = indices[keep], contrast[keep]
         # Bound the work before complex fitting on dense, noise-like spectra.
@@ -497,11 +504,11 @@ class CQTModalAnalysis:
         observed values rather than producing large, cancelling oscillators.
         """
         positions = peaks[:, FREQUENCY] * size / self.sample_rate
-        split = np.flatnonzero(np.diff(positions) > 4) + 1
-        groups = np.split(np.arange(len(peaks)), split)
-        isolated = np.array(
-            [group[0] for group in groups if len(group) == 1], dtype=int
-        )
+        boundaries = np.r_[0, np.flatnonzero(np.diff(positions) > 4) + 1, len(peaks)]
+        lengths = np.diff(boundaries)
+        isolated = boundaries[:-1][lengths == 1]
+        fitted_coefficients = np.zeros(len(peaks), dtype=np.complex128)
+        fitted_mask = np.zeros(len(peaks), dtype=bool)
         if len(isolated):
             # Most resonances are isolated. Fit all their lobes in one array
             # instead of thousands of tiny Python/SciPy calls per sample.
@@ -511,33 +518,43 @@ class CQTModalAnalysis:
             coefficients = np.sum(basis.conj() * spectrum[bins], axis=1) / np.sum(
                 np.abs(basis) ** 2, axis=1
             )
-            fitted = np.abs(coefficients)
-            valid = (fitted <= 2 * peaks[isolated, AMPLITUDE]) & (
-                fitted >= 0.25 * peaks[isolated, AMPLITUDE]
-            )
-            peaks[isolated[valid], AMPLITUDE] = fitted[valid]
-            peaks[isolated[valid], PHASE] = np.angle(coefficients[valid])
-        for group in groups:
-            if len(group) == 1:
-                continue
-            if len(group) > 4:
-                continue
+            fitted_coefficients[isolated] = coefficients
+            fitted_mask[isolated] = True
+        # Evaluate every small group's Hann response in a single vectorized
+        # call. The individual lstsq systems and their conditioning checks are
+        # unchanged; no normal equations or approximate response lookup is used.
+        systems = []
+        offsets = []
+        for group_index in np.flatnonzero((lengths >= 2) & (lengths <= 4)):
+            group = np.arange(boundaries[group_index], boundaries[group_index + 1])
             bins = np.arange(
                 max(1, int(positions[group[0]]) - 2),
                 min(len(spectrum) - 1, int(np.ceil(positions[group[-1]])) + 3),
             )
-            basis = _hann_response(positions[group][None, :] - bins[:, None], size)
+            offset = positions[group][None, :] - bins[:, None]
+            systems.append((group, bins, offset.shape))
+            offsets.append(offset.ravel())
+        responses = _hann_response(np.concatenate(offsets), size) if systems else None
+        cursor = 0
+        for group, bins, shape in systems:
+            count = shape[0] * shape[1]
+            basis = responses[cursor : cursor + count].reshape(shape)
+            cursor += count
             coefficients, _, _, singular = np.linalg.lstsq(
                 basis, spectrum[bins], rcond=1e-4
             )
             if singular[-1] < singular[0] * 0.02:
                 continue
-            fitted = np.abs(coefficients)
-            valid = (fitted <= 2 * peaks[group, AMPLITUDE]) & (
-                fitted >= 0.25 * peaks[group, AMPLITUDE]
-            )
-            peaks[group[valid], AMPLITUDE] = fitted[valid]
-            peaks[group[valid], PHASE] = np.angle(coefficients[valid])
+            fitted_coefficients[group] = coefficients
+            fitted_mask[group] = True
+        fitted = np.abs(fitted_coefficients)
+        valid = (
+            fitted_mask
+            & (fitted <= 2 * peaks[:, AMPLITUDE])
+            & (fitted >= 0.25 * peaks[:, AMPLITUDE])
+        )
+        peaks[valid, AMPLITUDE] = fitted[valid]
+        peaks[valid, PHASE] = np.angle(fitted_coefficients[valid])
         return peaks
 
     def _merge_peaks(self, peaks):
@@ -548,15 +565,29 @@ class CQTModalAnalysis:
         order = np.lexsort((-peaks[:, AMPLITUDE], peaks[:, BANDWIDTH]))
         selected = []
         suppressed = np.zeros(len(peaks), bool)
+        # Bounded by the per-view max_peaks limit. Build this relation once
+        # instead of allocating several arrays for every retained peak.
+        suppresses = None
+        if len(peaks) <= 1024:
+            suppresses = (peaks[:, SOURCE, None] != peaks[None, :, SOURCE]) & (
+                np.abs(peaks[:, FREQUENCY, None] - peaks[None, :, FREQUENCY])
+                < 0.9 * peaks[None, :, BANDWIDTH]
+            )
         for index in order:
             if suppressed[index]:
                 continue
             selected.append(index)
-            peak = peaks[index]
-            suppressed |= (peaks[:, SOURCE] != peak[SOURCE]) & (
-                np.abs(peaks[:, FREQUENCY] - peak[FREQUENCY])
-                < 0.9 * peaks[:, BANDWIDTH]
-            )
+            if suppresses is not None:
+                suppressed |= suppresses[index]
+            else:
+                # Very large user-selected mode budgets must not allocate an
+                # unbounded quadratic matrix. Use the same relation one row at
+                # a time in this uncommon case.
+                peak = peaks[index]
+                suppressed |= (peaks[:, SOURCE] != peak[SOURCE]) & (
+                    np.abs(peaks[:, FREQUENCY] - peak[FREQUENCY])
+                    < 0.9 * peaks[:, BANDWIDTH]
+                )
         selected = np.asarray(selected)
         if len(selected) > self.max_peaks:
             priority = peaks[selected, AMPLITUDE] ** 2 * (
@@ -587,10 +618,14 @@ class CQTModalAnalysis:
                         slope = (
                             track.peaks[-1][FREQUENCY] - track.peaks[-2][FREQUENCY]
                         ) / dt
-                        predicted[row] += np.clip(
-                            slope * elapsed[row],
-                            -self.max_deviation_hz,
-                            self.max_deviation_hz,
+                        # Keep the old float64 scalar addition even when the
+                        # clamp chooses a Python-float custom bound (NumPy 2
+                        # otherwise applies different scalar promotion rules).
+                        predicted[row] += np.float64(
+                            min(
+                                max(slope * elapsed[row], -self.max_deviation_hz),
+                                self.max_deviation_hz,
+                            )
                         )
                 gate = np.minimum(
                     self.max_deviation_hz,
@@ -607,16 +642,18 @@ class CQTModalAnalysis:
                 upper = np.searchsorted(frequencies, predicted + gate, side="left")
                 counts = upper - lower
                 rows = np.repeat(np.arange(len(active)), counts)
-                columns = np.concatenate(
-                    [
-                        np.arange(begin, end)
-                        for begin, end in zip(lower, upper)
-                        if begin < end
-                    ]
-                ) if rows.size else np.empty(0, dtype=int)
-                distance = (
-                    np.abs(predicted[rows] - frequencies[columns]) / gate[rows]
+                columns = (
+                    np.concatenate(
+                        [
+                            np.arange(begin, end)
+                            for begin, end in zip(lower, upper)
+                            if begin < end
+                        ]
+                    )
+                    if rows.size
+                    else np.empty(0, dtype=int)
                 )
+                distance = np.abs(predicted[rows] - frequencies[columns]) / gate[rows]
                 phase_error = _wrap_phase(
                     peaks[columns, PHASE]
                     - last[rows, PHASE]

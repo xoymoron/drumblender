@@ -1,0 +1,22 @@
+# Dedicated configuration for scripts.train_modal_control (not the legacy CLI).
+seed: 20020420
+model:
+  sample_rate: 48000
+  channels: 64
+  context_tokens: 8
+  features: 256
+  top_k: 8
+  learning_rate: 0.0001
+  joint_modal_lr_scale: 0.1
+  mask_probability: 0.15
+  modal_audio_weight: 0.1
+  anchor_weight: 1.0
+  residual_weight: 0.1
+data:
+  batch_size: 2
+  num_workers: 4
+epochs:
+  modal: 40
+  noise: 30
+  joint: 10
+  patterns: 15

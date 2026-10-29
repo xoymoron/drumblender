@@ -1,3 +1,19 @@
+## Current implementation goals
+
+Two research directions were adopted on 2026-10-29:
+
+- **A. Joint DSP synthesis:** jointly predict modal and noise/texture parameters,
+  then render and sum their DSP outputs (DDSP/SMS synthesis).
+- **B. Modal-conditioned neural synthesis:** use modal and audio/detail
+  representations to condition one neural decoder that generates the full
+  waveform (SMS-informed neural synthesis).
+
+See [implementation goals and comparison criteria](docs/research_implementation_goals.md)
+for the decision, remaining work, and the distinction between existing code and
+the two targets. Both are adopted goals; neither is reported as a completed,
+quality-validated architecture. The existing CLI's `joint` training stage does
+not by itself implement target A.
+
 ## Training
 Use the `drumblender` command to train a new model.
 
@@ -11,6 +27,20 @@ model configurations presented in the Forum Acusticum paper.
 
 We used the PyTorch Lightning
 [LightningCLI](https://lightning.ai/docs/pytorch/LTS/api/pytorch_lightning.cli.LightningCLI.html?highlight=lightningcli#pytorch_lightning.cli.LightningCLI).
+
+## Neural modal pattern control
+
+The new modal encoder, temporal sparse dictionary, and optional modal-conditioned
+noise path use a dedicated staged training CLI. See
+[training and audition instructions](docs/modal_control_training.md) for the
+modal → noise → joint → patterns sequence, two-GPU commands, checkpoint handling,
+and the distinction between fixed and linked noise during editing.
+
+Implementation is source-reviewed; training quality and runtime/DDP behavior
+still require validation in the project PyTorch environment.
+
+The [saved modal extraction viewer](docs/modal_saved_review.md) compares the
+completed NEW and FAST feature directories without rerunning either analyzer.
 
 ## Testing
 Pass `test` as an argument to `drumblender` to test a trained model. For example, to test a model on the test set of the Freesound Percussive One-Shot dataset:

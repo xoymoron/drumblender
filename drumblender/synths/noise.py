@@ -115,25 +115,27 @@ class NoiseGenerator(nn.Module):
 
         return output
 
-    def forward(self, noise_bands: torch.Tensor, target_lenght: Optional[int] = None):
+    def forward(self, noise_bands: torch.Tensor, target_lenght: Optional[int] = None,
+                noise_source: Optional[torch.Tensor] = None):
         """
         Args:
             noise_bands (torch.Tensor): A tensor with predicted filtered
                 noise coefficients [nb, frame_len, num_bands]
+            noise_source: Optional excitation [nb, frame_len, window_size].
+                Reuse the same tensor for reference/edit audition. Omitting it
+                preserves the existing stochastic synthesis behavior.
         """
         # Create a sequence of IRs according to input.
         impulse = self.amp_to_impulse_response(noise_bands, self.window_size)
 
         # Random uniform noise with range [-1,1]
-        noise = (
-            torch.rand(
-                impulse.shape[0],
-                impulse.shape[1],
-                self.window_size,
-            ).to(impulse)
-            * 2
-            - 1
-        )
+        shape = (impulse.shape[0], impulse.shape[1], self.window_size)
+        if noise_source is None:
+            noise = torch.rand(shape, device=impulse.device, dtype=impulse.dtype) * 2 - 1
+        else:
+            if tuple(noise_source.shape) != shape:
+                raise ValueError(f"Expected noise_source {shape}, got {tuple(noise_source.shape)}")
+            noise = noise_source.to(impulse)
 
         noise = self.fft_convolve(noise, impulse).contiguous()
         noise = self.overlap_and_add(noise)

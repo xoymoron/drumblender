@@ -1,5 +1,7 @@
 # Transient-aware Noise Control Implementation Plan
 
+> **2026-10-29 상태:** [현재 구현 목표](../../research_implementation_goals.md)는 **A. Joint DSP synthesis**와 **B. Modal-conditioned neural synthesis** 두 방향이다. 아래는 이전 frozen-modal + complex-texture 제안의 미실행 plan으로 보존한다. 새 A/B의 실행 계획으로 자동 적용하지 않으며, 아래 file map과 hyperparameters가 이번에 확정된 것도 아니다.
+
 > **For agentic workers:** Use superpowers:executing-plans to implement task-by-task when implementation is requested. Steps use checkbox syntax. This document is a proposed implementation plan, not an execution record.
 
 **Goal:** 기존 percussion sample의 phase-sensitive reconstruction과 발견 가능한 noise latent controls를 두 audible branches 안에서 구현한다.

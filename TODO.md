@@ -3,6 +3,21 @@
 This file tracks repo/development items that came up during the DrumBlender
 encoder work. 
 
+## Adopted implementation goals (2026-10-29)
+
+현재 목표의 기준 문서는 [두 구현 목표](docs/research_implementation_goals.md)다.
+**Joint DSP synthesis (A)**와 **Modal-conditioned neural synthesis (B)**를 모두 구현·비교한다.
+B만 채택하거나 A를 단순 참고 대상으로만 남기기로 결정한 것이 아니다.
+
+- [x] 두 방향의 합성 경계, 용어, 결정 경위와 기존 코드의 상태를 문서화한다.
+- [ ] A: joint context에서 modal/noise parameter를 함께 예측하고 DSP 출력을 합산하는 경로를 설계·구현한다.
+- [ ] B: modal conditioning과 audio/detail latent로 전체 waveform을 생성하는 neural decoder 및 conditioning 활용 학습을 설계·구현한다.
+- [ ] 기존 DrumBlender와 A/B, B의 modal-conditioning 제거 대조군을 공통 protocol로 비교한다.
+- [ ] Neutral reconstruction과 creative control을 분리 평가하고 held-out audition 및 실패 예시를 기록한다.
+
+기존 `modal -> noise -> joint -> patterns`의 `joint`는 training stage다. 새 목표 A의 구현 완료를 뜻하지 않는다.
+아래 encoder 설정과 분석기 조사 메모는 기존 경로/후보에 대한 기록이며 새 A/B 전체의 필수 architecture로 간주하지 않는다.
+
 ## Reference
 
 - Modal feature entry points:
