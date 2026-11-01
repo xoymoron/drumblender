@@ -78,9 +78,7 @@ source x -----------------> audio/detail representation z+
 
 관련 문서:
 
-- [기존 modal control 설계](modal_neural_control_design.md)
-- [기존 모델의 training / audition](modal_control_training.md)
-- [기존 modal control implementation record](superpowers/plans/2026-09-25-modal-control.md)
+- [기존 modal 분석·control 구현과 training / audition](modal.md)
 - [과거 complex-excitation texture 제안](superpowers/specs/2026-09-25-transient-aware-noise-control-design.md)
 - [과거 texture implementation plan](superpowers/plans/2026-09-25-transient-aware-noise-control.md)
 

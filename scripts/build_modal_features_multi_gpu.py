@@ -64,9 +64,6 @@ def main():
         default=None,
     )
     parser.add_argument("--num_modes", type=int, default=128)
-    parser.add_argument(
-        "--fast", action="store_true", help="Use the 16 ms fast NEW modal preset."
-    )
     parser.add_argument("--checkpoint_every", type=int, default=100)
     parser.add_argument("--gpu_cqt_batch_size", type=int, default=16)
     parser.add_argument("--resume", action="store_true")
@@ -96,8 +93,7 @@ def main():
     repository = Path(__file__).resolve().parents[1]
     processed_root = (repository / args.processed_root).resolve()
     requested_output = args.out_dir or Path(
-        f"../dataset/modal_features/processed_modal_"
-        f"{'fast' if args.fast else 'new'}{args.num_modes}"
+        f"../dataset/modal_features/processed_modal_new{args.num_modes}"
         f"{'_cpu' if args.cpu_workers else ''}"
     )
     out_dir = (repository / requested_output).resolve()
@@ -130,8 +126,6 @@ def main():
         ]
         if args.resume:
             command.append("--resume")
-        if args.fast:
-            command.append("--fast")
         worker_commands.append((label, physical_gpu, command))
 
     merge_command = [

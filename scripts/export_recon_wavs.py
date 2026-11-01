@@ -122,7 +122,7 @@ def _resolve_encoder_cfg(
     if backbone == "soundstream":
         return None
 
-    rel = Path("upgrades") / "encoders" / f"{kind}_{backbone}_style.yaml"
+    rel = Path("models") / "encoder" / f"{kind}_{backbone}_style.yaml"
     p = (cfg_dir / rel).resolve()
     if not p.is_file():
         raise FileNotFoundError(

@@ -60,3 +60,21 @@ init_args:
         frame_size: 1024
         hop_size: 256
         eps: 1.0e-05
+    mfcc:
+      class_path: drumblender.metrics.MFCCError
+      init_args:
+        sample_rate: 48000
+        n_mfcc: 40
+        n_mels: 128
+        n_fft: 2048
+        hop_length: 128
+        f_min: 20.0
+        f_max: 20000.0
+        include_c0: false
+    paired_timbre:
+      class_path: drumblender.metrics.PairedTimbreDistance
+      init_args:
+        sample_rate: 48000
+        model_name: laion/clap-htsat-unfused
+        revision: 8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a
+        stages: [0, 1, 2]

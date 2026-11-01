@@ -1,7 +1,7 @@
 import torch
 
-from drumblender.upgrades.encoders import DACStyleEncoder
-from drumblender.upgrades.encoders import DACStyleSequenceEncoder
+from drumblender.models.dac_style import DACStyleEncoder
+from drumblender.models.dac_style import DACStyleSequenceEncoder
 
 
 def test_dac_style_sequence_encoder_preserves_noise_shape():

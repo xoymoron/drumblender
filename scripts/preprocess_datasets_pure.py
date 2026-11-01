@@ -263,11 +263,10 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     from tqdm import tqdm
     from drumblender.utils.audio import preprocess_audio_file
-    from drumblender.utils.device import check_device, resolve_device
+    from drumblender.utils.device import resolve_device
 
     # Validate CUDA once before creating outputs or classifying any files.
     device = resolve_device(config.device)
-    check_device(device)
     print(f"[device] signal processing: {device}; audio I/O: cpu")
 
     config.processed_root.mkdir(parents=True, exist_ok=True)

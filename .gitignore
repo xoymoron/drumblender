@@ -160,6 +160,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -239,6 +240,8 @@ dataset*/
 # log directories
 lightning_logs/
 logs/
+ckpt/
+analysis/
 
 # Rendered audio
 test_audio/

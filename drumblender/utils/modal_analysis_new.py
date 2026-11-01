@@ -115,7 +115,6 @@ class CQTModalAnalysis:
         max_peaks: Optional[int] = None,
         frame_block_size: int = 128,
         refine: bool = True,
-        fast: bool = False,
         compute_device: str = "cpu",
         gpu_cqt_batch_size: int = 16,
     ):
@@ -188,7 +187,6 @@ class CQTModalAnalysis:
         self.long_window = long_window
         self.frame_block_size = frame_block_size
         self.refine = refine
-        self.fast = fast
         self.compute_device = compute_device
         self.gpu_cqt_batch_size = gpu_cqt_batch_size
         self.max_peaks = (
@@ -382,7 +380,7 @@ class CQTModalAnalysis:
             for offset, values in enumerate(spectra):
                 frame = start + offset
                 error = (centers[frame] - locations[offset]) / self.sample_rate
-                if source == 2 and not self.fast:
+                if source == 2:
                     # Fine frequency estimates need not impose a long envelope
                     # window on an isolated, short high-frequency resonance.
                     anchors = self._merge_peaks(frames[frame])

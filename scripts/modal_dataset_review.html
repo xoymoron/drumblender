@@ -43,7 +43,7 @@
 </head>
 <body>
   <h1>Modal extraction review</h1>
-  <p class="muted">완료된 NEW·FAST feature를 그대로 읽어 같은 원본에서 비교한다. Random 버튼은 새 sample의 저장된 파일을 연다. Legacy 분석은 아래에서 요청할 때만 실행한다.</p>
+  <p class="muted">완료된 NEW feature를 그대로 읽어 원본과 비교한다. Random 버튼은 새 sample의 저장된 파일을 연다. Legacy 분석은 아래에서 요청할 때만 실행한다.</p>
   <p id="dataset-summary" class="muted">추출 통계 로딩 중…</p>
   <div class="toolbar">
     <label>Pack <select id="pack"><option value="">전체</option></select></label>
@@ -54,26 +54,23 @@
   </div>
   <h2 id="name" class="sample-name">아직 선택된 sample 없음</h2>
   <p id="details" class="muted"></p>
-  <p id="comparison" class="muted"></p>
   <div class="cards">
     <div class="card"><strong>① Original</strong><span class="mode-count">원음</span><small>NEW 추출 폴더에 저장된 preprocessed WAV</small><audio id="audio-original" controls preload="none"></audio></div>
     <div class="card" id="card-legacy" hidden><strong>② Legacy modal</strong><span class="mode-count" id="count-legacy">— modes</span><span class="card-meta" id="meta-legacy"></span><small>선택할 때에만 현재 modal_analysis.py를 실행</small><audio id="audio-legacy" controls preload="none"></audio></div>
     <div class="card"><strong>③ NEW modal</strong><span class="mode-count" id="count-new">— modes</span><span class="card-meta" id="meta-new"></span><small>완료된 NEW .pt를 로드하고 합성</small><audio id="audio-new" controls preload="none"></audio></div>
-    <div class="card"><strong>④ FAST modal</strong><span class="mode-count" id="count-fast">— modes</span><span class="card-meta" id="meta-fast"></span><small>완료된 FAST .pt를 로드하고 합성</small><audio id="audio-fast" controls preload="none"></audio></div>
   </div>
   <div class="legend">
-    <b>그림 읽기:</b> 선택한 축으로 네 소리를 화면 너비에 맞춰 표시한다. Mel 보기에는 긴 STFT(8,192 samples)를, linear 보기에는 짧은 STFT(2,048 samples)를 사용한다. 둘 다 <em>표시용</em>이며 mel 보기는 mel filterbank가 아니라 STFT 그림의 frequency 축만 mel로 바꾼 것이다. 추출 자체는 LF CQT와 long/short STFT를 함께 사용한다. 색은 각 보기의 Original 최대 STFT 크기를 0 dB로 두고 −80~0 dB로 고정했다. 관측 선은 실제 peak가 있는 frame만 이으며 빈 frame을 가로질러 연결하지 않는다.
-    <div class="source-legend"><span style="color:#35d8ef">● NEW 관측</span><span style="color:lime">● FAST 관측</span><span>저장된 .pt에는 mode별 CQT/STFT 출처가 없어서 선 색으로 구분하지 않는다. 카드의 출처별 mode 수는 metadata 집계값이다.</span></div>
+    <b>그림 읽기:</b> 선택한 축으로 원음과 modal 합성을 화면 너비에 맞춰 표시한다. Mel 보기에는 긴 STFT(8,192 samples)를, linear 보기에는 짧은 STFT(2,048 samples)를 사용한다. 둘 다 <em>표시용</em>이며 mel 보기는 mel filterbank가 아니라 STFT 그림의 frequency 축만 mel로 바꾼 것이다. 추출 자체는 LF CQT와 long/short STFT를 함께 사용한다. 색은 각 보기의 Original 최대 STFT 크기를 0 dB로 두고 −80~0 dB로 고정했다. 관측 선은 실제 peak가 있는 frame만 이으며 빈 frame을 가로질러 연결하지 않는다.
+    <div class="source-legend"><span style="color:#35d8ef">● NEW 관측</span><span>저장된 .pt에는 mode별 CQT/STFT 출처가 없어서 선 색으로 구분하지 않는다. 카드의 출처별 mode 수는 metadata 집계값이다.</span></div>
   </div>
   <div class="controls">
     <label>Frequency 축 <select id="scale"><option value="mel">Mel · 저역 상세</option><option value="linear">Linear · 고역/어택</option></select></label>
     <label><input id="show-new" type="checkbox"> Original 위 NEW observed 표시</label>
-    <label><input id="show-fast" type="checkbox"> Original 위 FAST observed 표시 <span style="color:lime">●</span></label>
     <label><input id="include-legacy" type="checkbox"> Legacy도 분석해서 표시 · 추가 계산 필요</label>
   </div>
   <div class="plots" id="plots"></div>
   <script>
-    const names = ["original", "legacy", "new", "fast"];
+    const names = ["original", "legacy", "new"];
     const scales = ["mel", "linear"];
     const status = document.querySelector("#status");
     const plots = document.querySelector("#plots");
@@ -89,7 +86,7 @@
         panel.hidden = scale !== "mel";
         panel.innerHTML = `<h3>${name.toUpperCase()} · ${scale} axis</h3><div class="layers">
           <img data-plot="${name}_${scale}" alt="${name} ${scale} spectrogram">
-          ${name === "original" ? `<img class="overlay" data-overlay="observed_new_${scale}" hidden alt="NEW observed tracks"><img class="overlay" data-overlay="observed_fast_${scale}" hidden alt="FAST observed tracks">` : ""}
+          ${name === "original" ? `<img class="overlay" data-overlay="observed_new_${scale}" hidden alt="NEW observed tracks">` : ""}
           </div>`;
         plots.append(panel);
       }
@@ -98,9 +95,6 @@
     function updateOverlays() {
       document.querySelectorAll('[data-overlay^="observed_new_"]').forEach(img => {
         img.hidden = !document.querySelector("#show-new").checked;
-      });
-      document.querySelectorAll('[data-overlay^="observed_fast_"]').forEach(img => {
-        img.hidden = !document.querySelector("#show-fast").checked;
       });
     }
     function updateScale() {
@@ -116,7 +110,6 @@
     }
     document.querySelector("#scale").addEventListener("change", updateScale);
     document.querySelector("#show-new").addEventListener("change", updateOverlays);
-    document.querySelector("#show-fast").addEventListener("change", updateOverlays);
     document.querySelector("#include-legacy").addEventListener("change", () => {
       if (document.querySelector("#include-legacy").checked && current && !current.legacy_included) {
         load(`/api/sample?id=${encodeURIComponent(current.id)}`);
@@ -147,20 +140,9 @@
           document.querySelector("#meta-legacy").textContent = `추가 분석 ${report.legacy_seconds}s`;
         }
         document.querySelector("#count-new").textContent = `${report.new_modes} modes`;
-        document.querySelector("#count-fast").textContent = `${report.fast_modes} modes`;
         document.querySelector("#meta-new").textContent =
           `LF ${report.new_lf_modes} · HF ${report.new_hf_modes} · 관측 frame ${report.new_observed_frames} · 평균 confidence ${Number(report.new_mean_confidence).toFixed(2)} · ` +
           `후보 ${report.new_candidates} · 상한 탈락 ${report.new_limit_rejected} · 저장 당시 ${report.new_saved_seconds}s · 출처: ${sourceCounts(report.new_sources)}`;
-        document.querySelector("#meta-fast").textContent =
-          `LF ${report.fast_lf_modes} · HF ${report.fast_hf_modes} · 관측 frame ${report.fast_observed_frames} · 평균 confidence ${Number(report.fast_mean_confidence).toFixed(2)} · ` +
-          `후보 ${report.fast_candidates} · 상한 탈락 ${report.fast_limit_rejected} · 저장 당시 ${report.fast_saved_seconds}s · 출처: ${sourceCounts(report.fast_sources)}`;
-        const modeDelta = report.new_modes - report.fast_modes;
-        const savedRatio = Number(report.new_saved_seconds) / Number(report.fast_saved_seconds);
-        document.querySelector("#comparison").textContent =
-          `이 sample: NEW ${modeDelta >= 0 ? "+" : ""}${modeDelta} modes (FAST 대비) · ` +
-          `LF ${report.new_lf_modes - report.fast_lf_modes >= 0 ? "+" : ""}${report.new_lf_modes - report.fast_lf_modes}, ` +
-          `HF ${report.new_hf_modes - report.fast_hf_modes >= 0 ? "+" : ""}${report.new_hf_modes - report.fast_hf_modes}` +
-          (Number.isFinite(savedRatio) && savedRatio > 0 ? ` · 저장된 분석 시간 비 ${savedRatio.toFixed(1)}×` : "");
         for (const name of names) {
           if (name === "legacy" && !report.legacy_included) continue;
           const audio = document.querySelector(`#audio-${name}`);
@@ -173,10 +155,8 @@
           }
         }
         for (const scale of scales) {
-          for (const method of ["new", "fast"]) {
-            document.querySelector(`[data-overlay="observed_${method}_${scale}"]`).src =
-              report.media + `observed_${method}_${scale}.png`;
-          }
+          document.querySelector(`[data-overlay="observed_new_${scale}"]`).src =
+            report.media + `observed_new_${scale}.png`;
         }
         updateOverlays();
         updateScale();
@@ -222,7 +202,7 @@
       const selector = document.querySelector("#pack");
       for (const pack of info.packs) selector.add(new Option(pack, pack));
       document.querySelector("#dataset-summary").textContent =
-        `${summaryLine("NEW", info.new_summary)}  |  ${summaryLine("FAST", info.fast_summary)}  |  공통 ${info.count}개`;
+        summaryLine("NEW", info.new_summary);
       const id = new URLSearchParams(location.search).get("id");
       status.textContent = `${info.count} samples 준비됨.`;
       if (id) load(`/api/sample?id=${encodeURIComponent(id)}`);

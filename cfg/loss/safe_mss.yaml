@@ -1,4 +1,4 @@
-class_path: drumblender.upgrades.losses.SafeScaleInvariantMSSLoss
+class_path: drumblender.loss.SafeScaleInvariantMSSLoss
 init_args:
   sample_rate: 48000
   # Independent runtime toggles:

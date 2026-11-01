@@ -97,7 +97,8 @@ def test_audio_dataset_getitem(fs, mocker):
         f"{TESTED_MODULE}.torchaudio.load",
         return_value=(test_audio, TEST_SAMPLE_RATE),
     )
-    (audio,) = dataset[0]
+    audio, length = dataset[0]
+    assert length == TEST_NUM_SAMPLES
     assert audio.shape == (1, TEST_NUM_SAMPLES)
     assert torch.all(audio == test_audio)
 

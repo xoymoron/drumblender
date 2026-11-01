@@ -1,6 +1,6 @@
-"""Review saved NEW and FAST modal features without rerunning extraction.
+"""Review saved NEW modal features without rerunning extraction.
 
-Original audio and both feature tensors are loaded from completed extraction
+Original audio and modal feature tensors are loaded from a completed extraction
 directories. Legacy analysis runs only when explicitly requested.
 """
 
@@ -135,7 +135,7 @@ def _load_stored(feature_path, sample_count, device):
     return wave, feature
 
 
-def _read_extraction(root: Path, expected_fast: bool):
+def _read_extraction(root: Path):
     """Read only metadata at startup; load per-sample tensors on demand."""
     root = root.resolve()
     config_path = root / "modal_config.json"
@@ -145,9 +145,6 @@ def _read_extraction(root: Path, expected_fast: bool):
             f"Expected modal_config.json and metadata.json under {root}"
         )
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    if bool(config.get("fast")) != expected_fast:
-        kind = "FAST" if expected_fast else "full NEW"
-        raise ValueError(f"{root} is not a completed {kind} extraction")
     items = json.loads(metadata_path.read_text(encoding="utf-8"))
     stats_path = root / "run_stats.json"
     run = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.is_file() else {}
@@ -177,42 +174,29 @@ def _summary(items, run, mode_ceiling):
     }
 
 
-def render_sample(sample_id, new_item, fast_item, new_root, fast_root,
-                  output, new_config, fast_config, render_device,
-                  include_legacy=False):
+def render_sample(
+    sample_id, new_item, new_root, output, new_config, render_device,
+    include_legacy=False,
+):
     """Build one comparison from saved tensors; legacy runs only by opt-in."""
     source = _safe_asset(new_root, new_item["filename"])
-    fast_source = _safe_asset(fast_root, fast_item["filename"])
     new_path = _safe_asset(new_root, new_item["feature_file"])
-    fast_path = _safe_asset(fast_root, fast_item["feature_file"])
     audio, sample_rate = sf.read(source, dtype="float32", always_2d=True)
     if audio.shape[1] != 1:
         raise ValueError(f"Expected mono preprocessed WAV: {source}")
     audio = audio[:, 0]
     if len(audio) == 0:
         raise ValueError(f"Empty preprocessed WAV: {source}")
-    fast_audio, fast_rate = sf.read(fast_source, dtype="float32", always_2d=True)
-    if (fast_rate != sample_rate or fast_audio.shape != (len(audio), 1)
-            or not np.allclose(fast_audio[:, 0], audio, rtol=0, atol=1e-6)):
-        raise ValueError(f"NEW/FAST source WAV differs for {sample_id}; comparison would be invalid")
-    if sample_rate != new_config["sample_rate"] or sample_rate != fast_config["sample_rate"]:
-        raise ValueError(f"Sample rate differs between audio and extraction configs: {source}")
-    if new_item.get("orig_relpath") != fast_item.get("orig_relpath"):
-        raise ValueError(f"NEW/FAST sample identity mismatch for {sample_id}")
+    if sample_rate != new_config["sample_rate"]:
+        raise ValueError(f"Sample rate differs between audio and extraction config: {source}")
     if int(new_item.get("num_samples", len(audio))) != len(audio):
         raise ValueError(f"NEW metadata/audio length mismatch for {sample_id}")
-    if int(fast_item.get("num_samples", len(audio))) != len(audio):
-        raise ValueError(f"FAST metadata/audio length mismatch for {sample_id}")
 
     new_wave, new_feature = _load_stored(new_path, len(audio), render_device)
-    fast_wave, fast_feature = _load_stored(fast_path, len(audio), render_device)
-    for label, feature, item in (
-        ("NEW", new_feature, new_item), ("FAST", fast_feature, fast_item)
-    ):
-        stored_count = int((feature[1] != 0).any(dim=-1).sum())
-        if item.get("active_modes") is not None and stored_count != item["active_modes"]:
-            raise ValueError(f"{label} active-mode metadata differs from {sample_id}.pt")
-    # Legacy is the current ampzero-aware modal_analysis.py, never _OLD.py.
+    stored_count = int((new_feature[1] != 0).any(dim=-1).sum())
+    if new_item.get("active_modes") is not None and stored_count != new_item["active_modes"]:
+        raise ValueError(f"NEW active-mode metadata differs from {sample_id}.pt")
+    # Recompute legacy tracks only when explicitly requested by the viewer.
     legacy = legacy_info = None
     if include_legacy:
         legacy, legacy_info = legacy_render(audio, sample_rate, new_config["num_modes"])
@@ -226,7 +210,6 @@ def render_sample(sample_id, new_item, fast_item, new_root, fast_root,
     waves = {
         "original": audio,
         "new": new_wave,
-        "fast": fast_wave,
     }
     if legacy is not None:
         waves["legacy"] = legacy
@@ -243,11 +226,6 @@ def render_sample(sample_id, new_item, fast_item, new_root, fast_root,
             _stored_tracks(new_feature, len(audio), sample_rate),
             len(audio) / sample_rate, sample_rate, scale, "cyan",
         )
-        _plot_observed_layer(
-            folder / f"observed_fast_{scale}.png",
-            _stored_tracks(fast_feature, len(audio), sample_rate),
-            len(audio) / sample_rate, sample_rate, scale, "lime",
-        )
 
     return {
         "id": sample_id,
@@ -255,26 +233,17 @@ def render_sample(sample_id, new_item, fast_item, new_root, fast_root,
         "pack": new_item["sample_pack_key"],
         "duration_seconds": round(len(audio) / sample_rate, 3),
         "lf_hf_boundary_hz": new_config["cqt_max_frequency"],
-        "fast_modes": int((fast_feature[1] != 0).any(dim=-1).sum()),
-        "fast_lf_modes": fast_item.get("modal_lf_modes"),
-        "fast_hf_modes": fast_item.get("modal_hf_modes"),
         "legacy_modes": legacy_info["modes"] if legacy_info else None,
         "new_modes": int((new_feature[1] != 0).any(dim=-1).sum()),
         "new_lf_modes": new_item.get("modal_lf_modes"),
         "new_hf_modes": new_item.get("modal_hf_modes"),
         "new_sources": new_item.get("modal_source_modes", {}),
-        "fast_sources": fast_item.get("modal_source_modes", {}),
         "legacy_seconds": round(legacy_info["analysis_seconds"], 3) if legacy_info else None,
         "new_saved_seconds": new_item.get("analysis_seconds"),
-        "fast_saved_seconds": fast_item.get("analysis_seconds"),
         "new_candidates": new_item.get("modal_candidates_pre_limit"),
-        "fast_candidates": fast_item.get("modal_candidates_pre_limit"),
         "new_limit_rejected": new_item.get("modal_limit_rejected"),
-        "fast_limit_rejected": fast_item.get("modal_limit_rejected"),
         "new_observed_frames": new_item.get("modal_observed_frames"),
-        "fast_observed_frames": fast_item.get("modal_observed_frames"),
         "new_mean_confidence": new_item.get("modal_mean_confidence"),
-        "fast_mean_confidence": fast_item.get("modal_mean_confidence"),
         "legacy_included": include_legacy,
         "media": f"/media/{generation}/",
     }
@@ -307,11 +276,9 @@ class ReviewHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/info":
             self._json({
                 "count": len(server.items),
-                "packs": sorted({x[0]["sample_pack_key"] for x in server.items.values()}),
+                "packs": sorted({x["sample_pack_key"] for x in server.items.values()}),
                 "new_summary": server.new_summary,
-                "fast_summary": server.fast_summary,
                 "new_boundary_hz": server.new_config["cqt_max_frequency"],
-                "fast_boundary_hz": server.fast_config["cqt_max_frequency"],
             })
             return
         if parsed.path in ("/api/random", "/api/sample"):
@@ -323,7 +290,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 pack = query.get("pack", [""])[0]
                 exclude = query.get("exclude", [""])[0]
                 candidates = [
-                    key for key, (item, _) in server.items.items()
+                    key for key, item in server.items.items()
                     if key != exclude and (not pack or item["sample_pack_key"] == pack)
                 ]
                 random.shuffle(candidates)
@@ -334,11 +301,10 @@ class ReviewHandler(BaseHTTPRequestHandler):
             with server.analysis_lock:
                 for sample_id in candidates:
                     try:
-                        new_item, fast_item = server.items[sample_id]
+                        new_item = server.items[sample_id]
                         report = render_sample(
-                            sample_id, new_item, fast_item,
-                            server.new_root, server.fast_root,
-                            server.output, server.new_config, server.fast_config,
+                            sample_id, new_item, server.new_root,
+                            server.output, server.new_config,
                             server.render_device, include_legacy,
                         )
                         self._json(report)
@@ -366,11 +332,7 @@ def main():
         "--new_root", type=Path,
         default=Path("../dataset/modal_features/processed_modal_new128"),
     )
-    parser.add_argument(
-        "--fast_root", type=Path,
-        default=Path("../dataset/modal_features/processed_modal_fast128"),
-    )
-    parser.add_argument("--output", type=Path, default=Path("analysis/modal_dataset_review"))
+    parser.add_argument("--output", type=Path, default=Path("insights/modal_dataset_review"))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
@@ -380,25 +342,16 @@ def main():
     )
     args = parser.parse_args()
     try:
-        new_root, new_config, new_items, new_run = _read_extraction(args.new_root, False)
-        fast_root, fast_config, fast_items, fast_run = _read_extraction(args.fast_root, True)
+        new_root, new_config, new_items, new_run = _read_extraction(args.new_root)
     except (FileNotFoundError, ValueError) as error:
         parser.error(str(error))
-    if new_config["sample_rate"] != fast_config["sample_rate"]:
-        parser.error("NEW and FAST sample rates differ.")
-    if new_config["cqt_max_frequency"] != fast_config["cqt_max_frequency"]:
-        parser.error("NEW and FAST LF/HF boundaries differ; counts are not comparable.")
-    fast_by_path = {
-        item.get("orig_relpath"): item for item in fast_items.values()
+    items = {
+        key: item
+        for key, item in new_items.items()
         if item.get("orig_relpath")
     }
-    items = {
-        key: (item, fast_by_path[item["orig_relpath"]])
-        for key, item in new_items.items()
-        if item.get("orig_relpath") in fast_by_path
-    }
     if not items:
-        parser.error("No matching samples by orig_relpath between NEW and FAST.")
+        parser.error("No saved samples with orig_relpath in metadata.")
     if args.render_device == "cuda" and not torch.cuda.is_available():
         parser.error("CUDA rendering requested, but PyTorch CUDA is unavailable.")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.render_device == "auto" else args.render_device
@@ -407,19 +360,16 @@ def main():
     shutil.copyfile(Path(__file__).with_name("modal_dataset_review.html"), page)
     server = HTTPServer((args.host, args.port), ReviewHandler)
     server.new_root = new_root
-    server.fast_root = fast_root
     server.output = args.output.resolve()
     server.page = page
     server.items = items
     server.new_config = new_config
-    server.fast_config = fast_config
     server.new_summary = _summary(new_items, new_run, int(new_config["num_modes"]))
-    server.fast_summary = _summary(fast_items, fast_run, int(fast_config["num_modes"]))
     server.render_device = device
     server.analysis_lock = threading.Lock()
     print(
-        f"Review {len(items)} paired samples at http://{args.host}:{args.port}/ "
-        f"(saved NEW + FAST, render on {device}; legacy only on request)",
+        f"Review {len(items)} saved samples at http://{args.host}:{args.port}/ "
+        f"(saved NEW, render on {device}; legacy only on request)",
         flush=True,
     )
     server.serve_forever()

@@ -1,102 +1,82 @@
-## Current implementation goals
+# DrumBlender
 
-Two research directions were adopted on 2026-10-29:
+Unlabeled percussion reconstruction and timbre-control experiments at 48 kHz.
+Train/validation/test splits and evaluation reports use top-level sample packs.
+
+## Research goals
+
+Two directions were adopted on 2026-10-29:
 
 - **A. Joint DSP synthesis:** jointly predict modal and noise/texture parameters,
-  then render and sum their DSP outputs (DDSP/SMS synthesis).
-- **B. Modal-conditioned neural synthesis:** use modal and audio/detail
-  representations to condition one neural decoder that generates the full
-  waveform (SMS-informed neural synthesis).
+  then render and sum their DSP outputs.
+- **B. Modal-conditioned neural synthesis:** condition a neural waveform decoder
+  on modal and audio/detail representations.
 
-See [implementation goals and comparison criteria](docs/research_implementation_goals.md)
-for the decision, remaining work, and the distinction between existing code and
-the two targets. Both are adopted goals; neither is reported as a completed,
-quality-validated architecture. The existing CLI's `joint` training stage does
-not by itself implement target A.
+See [implementation goals](docs/research_implementation_goals.md) for the
+comparison criteria and remaining work. Both are goals; neither is reported as
+completed or quality-validated. The existing CLI's `joint` training stage
+fine-tunes the current modal/noise model and does not implement target A.
+
+## Installation
+
+Use Python 3.10–3.12 and the PyTorch/torchaudio versions declared in
+[pyproject.toml](pyproject.toml), with a build appropriate for your machine.
+Install the project and its modal-analysis dependencies:
+
+```bash
+python -m pip install -e '.[modal,modal_new]'
+```
+
+## Data and modal extraction
+
+1. [Preprocess raw audio](PROCESSING.md) from `../rawdata` to
+   `../dataset/processed`.
+2. [Extract modal features](docs/modal.md#extraction), including parallel workers,
+   checkpoint/resume and metadata merging.
+3. [Review saved modal features](docs/modal.md#saved-feature-review) without rerunning
+   either analyzer.
+
+[cfg/data/custom_all.yaml](cfg/data/custom_all.yaml) selects the full unlabeled
+corpus. `cfg/data/custom_pack_*.yaml` selects individual source packs.
+Point `data_dir` at the feature cache used for the experiment and match
+`expected_num_modes` to its mode count.
 
 ## Training
-Use the `drumblender` command to train a new model.
 
 ```bash
-drumblender fit -c cfg/01_noise_params.yaml --data cfg/data/freesound.yaml
+drumblender fit -c cfg/05_all_parallel.yaml
+bash run.sh plain dac soundstream
 ```
 
-Training config files can be found in the directory `cfg`. The configuration files
-in the root of that directory are the configurations used to train and test the different
-model configurations presented in the Forum Acusticum paper.
+The six numbered configs retain modal/noise/transient ablations and use the
+custom unlabeled corpus. Encoders live in `drumblender/models/`, their YAMLs in
+`cfg/models/encoder/`, and training losses in `drumblender/loss.py` with YAMLs in
+`cfg/loss/`. Encoder and loss choices remain selectable through `run.sh`.
 
-We used the PyTorch Lightning
-[LightningCLI](https://lightning.ai/docs/pytorch/LTS/api/pytorch_lightning.cli.LightningCLI.html?highlight=lightningcli#pytorch_lightning.cli.LightningCLI).
+The [modal-control training CLI](docs/modal.md#training-and-audition) uses the
+`modal → noise → joint → patterns` sequence. That guide distinguishes the
+existing implementation from the two research goals above.
 
-## Neural modal pattern control
+## Reconstruction evaluation
 
-The new modal encoder, temporal sparse dictionary, and optional modal-conditioned
-noise path use a dedicated staged training CLI. See
-[training and audition instructions](docs/modal_control_training.md) for the
-modal → noise → joint → patterns sequence, two-GPU commands, checkpoint handling,
-and the distinction between fixed and linked noise during editing.
+Use [the evaluation workflow](scripts/evaluation.md) to export paired
+target/reconstruction WAVs and generate whole-test and top-level-pack statistics,
+tables and a dashboard.
 
-Implementation is source-reviewed; training quality and runtime/DDP behavior
-still require validation in the project PyTorch environment.
-
-The [saved modal extraction viewer](docs/modal_saved_review.md) compares the
-completed NEW and FAST feature directories without rerunning either analyzer.
-
-## Testing
-Pass `test` as an argument to `drumblender` to test a trained model. For example, to test a model on the test set of the Freesound Percussive One-Shot dataset:
+The Lightning evaluation wrappers use the custom data config:
 
 ```bash
-drumblender test -c models/forum-acusticum-2023/noise_parallel_transient_params.yaml --ckpt models/forum-acusticum-2023/noise_parallel_transient_params.ckpt --data cfg/data/freesound.yaml --trainer.logger CSVLogger --model.test_metrics cfg/metrics/drumblender_metrics.yaml
+bash scripts/reconstruction_metrics.sh /path/to/run model_name
+bash scripts/reconstruction_modal.sh /path/to/modal.ckpt
 ```
 
-The `--trainer.logger` argument overrides the logging configuration in the saved yaml file. `--model.test_metrics` adds extra metrics used in the evaluation for the paper.
-
-To run this command on a CPU you can add the argument `--trainer.accelerator cpu`
-
-## GitHub Pages
-This repository includes a static experiment board under `docs/` for publishing
-evaluation summaries and a small curated audio audition set on GitHub Pages.
-
-To rebuild the site from the local NOISEDAC evaluation output in `../results/`:
+## Development
 
 ```bash
-python scripts/build_github_pages.py --logs-root ../results/run_NOISEDAC_20260412_231956 --output docs --samples-per-run 6
+python -m pip install -e '.[dev,modal,modal_new]'
+pre-commit install
+pytest
 ```
 
-The script scans `../results/run_NOISEDAC_20260412_231956/**/evaluation/summary.json`, copies a few
-target/reconstruction audio pairs for runs that include `manifest.csv`, and
-writes the site data to `docs/data/site-data.json`. A GitHub Actions workflow at
-`.github/workflows/pages.yml` then deploys the `docs/` folder to GitHub Pages on
-pushes to `main`.
-
-To add the controllability audition panel, pre-render static control sweeps in
-the same Python environment used for inference:
-
-```bash
-python scripts/recon/control_demo.py ../results/run_NOISEDAC_20260412_231956 --output docs --methods both --sample-count 3 --num-knobs 2 --axis-samples 512 --clear
-```
-
-This writes wav files under `docs/media/control/` and updates
-`docs/data/control-data.json` for the Control tab.
-
-## System Information
-For Forum Acusticum 2023, experiments were run using
-
-- Python version: 3.10.10.
-- GPU: Tesla V100-PCIE-16GB
-
-The exact Python packages in the environment during model training are in
-`train-packages.txt`.
-
-## For Developers
-To install dev requirements and pre-commit hooks:
-
-```bash
-$ pip install -e ".[dev]"
-```
-
-Install pre-commit hooks if developing and contributing:
-
-```bash
-$ pre-commit install
-```
+`test/` contains functional and research regression tests. Checkpoints, feature
+caches and evaluation results are local experiment artifacts.

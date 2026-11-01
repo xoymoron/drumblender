@@ -143,6 +143,7 @@ def test_preprocess_audio_file_does_not_fade_the_retained_tail(tmp_path_factory)
         frame_size=4,
         hop_size=4,
         min_tail_silence_ms=1.0,
+        remove_end_silence=True,
     )
 
     output, _ = torchaudio.load(output_file)

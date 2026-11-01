@@ -6,11 +6,10 @@ by the reference API. Conditioning learns correlations, not counterfactual truth
 """
 from __future__ import annotations
 
-import torch
 from torch import nn
 from torch.nn import functional as F
 
-from drumblender.upgrades.encoders.dac_style import DACStyleEncoder
+from drumblender.models.dac_style import DACStyleEncoder
 
 
 class ModalConditionedNoise(nn.Module):

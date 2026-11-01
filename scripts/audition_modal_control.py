@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--noise_link", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--output", type=Path, default=Path("analysis/modal_control_audition"))
+    parser.add_argument("--output", type=Path, default=Path("insights/modal_control_audition"))
     args = parser.parse_args()
     model = ModalControlTask.load_from_checkpoint(str(args.checkpoint), map_location="cpu")
     model.to(args.device).eval()

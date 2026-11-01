@@ -1,13 +1,13 @@
 import torch
 
-from drumblender.upgrades.encoders import APCodecStyleAttentionEncoder
-from drumblender.upgrades.encoders import APCodecStyleEncoder
-from drumblender.upgrades.encoders import BSCodecStyleAttentionEncoder
-from drumblender.upgrades.encoders import BSCodecStyleEncoder
-from drumblender.upgrades.encoders import SpectroStreamStyleAttentionEncoder
-from drumblender.upgrades.encoders import SpectroStreamStyleEncoder
-from drumblender.upgrades.encoders import WavTokenizerStyleAttentionEncoder
-from drumblender.upgrades.encoders import WavTokenizerStyleEncoder
+from drumblender.models.codec_styles import APCodecStyleAttentionEncoder
+from drumblender.models.codec_styles import APCodecStyleEncoder
+from drumblender.models.codec_styles import BSCodecStyleAttentionEncoder
+from drumblender.models.codec_styles import BSCodecStyleEncoder
+from drumblender.models.codec_styles import SpectroStreamStyleAttentionEncoder
+from drumblender.models.codec_styles import SpectroStreamStyleEncoder
+from drumblender.models.codec_styles import WavTokenizerStyleAttentionEncoder
+from drumblender.models.codec_styles import WavTokenizerStyleEncoder
 
 
 def _assert_frame_encoder_shape(encoder):

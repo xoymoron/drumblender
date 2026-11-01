@@ -37,22 +37,6 @@ The preprocessing script accepts these `--device` values:
 | `cuda:1` | Use visible GPU index 1 (respects `CUDA_VISIBLE_DEVICES`). |
 | `auto` | Use CUDA if PyTorch reports it available; otherwise use CPU. |
 
-An explicit CUDA request fails before processing files when CUDA is unavailable
-or its basic kernel check fails. `auto` does not hide an incompatible CUDA build
-or retry processing failures on CPU. Each GPU server still needs a compatible
-PyTorch/torchaudio build and NVIDIA driver; the Python source is shared.
-
-CUDA does not guarantee faster preprocessing for short files: decoding, disk
-I/O and synchronization may dominate. CPU/CUDA floating-point differences can
-affect threshold-boundary decisions; bitwise identity is not promised.
-
-## Server verification
-
-With Torch, torchaudio, and pytest installed, run:
-
-```bash
-python -m pytest -o addopts= --confcutdir=test/unit test/unit/test_processing_cli.py test/unit/utils/test_processing_devices.py -q
-```
-
-These tests cover explicit/automatic device selection, CUDA preflight failures,
-and CPU/CUDA resampling and trimming. CUDA cases are skipped on CPU-only hosts.
+An explicit CUDA request fails when CUDA or the selected device is unavailable.
+`auto` chooses the available device before processing; processing errors are
+reported without retrying files on another device.

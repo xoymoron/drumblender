@@ -64,7 +64,7 @@ def write_html(output, summaries):
         safe_directory = html.escape(directory, quote=True)
         options.append(f'<option value="{safe_directory}">{safe_name}</option>')
         players = []
-        modal_label = "FAST modal" if summary.get("fast") else "NEW modal"
+        modal_label = "NEW modal"
         for label, filename, description in [
             ("① Original", "original", "분석기에 넣은 원본 WAV"),
             ("② Legacy modal", "legacy", "기존 CQT 분석기로 얻은 modal branch만 합성"),
@@ -134,7 +134,7 @@ def write_html(output, summaries):
 <li><b>④ Residual</b>: Original − NEW modal의 <em>sample별 waveform 차이</em>. 남은 tonal 성분과 phase 오차도 포함하므로 noise branch의 복원 결과가 아니다.</li>
 </ul><p>아래 그림의 <b>네 행</b>도 위 순서와 같다. 왼쪽 열은 20–2000 Hz를 긴 STFT로, 오른쪽 열은 전체 대역을 짧은 STFT로 <em>표시</em>한다. 두 열은 합성 branch가 아니라 시각화 방법이다. 모든 행은 해당 열의 Original과 같은 dB 기준으로 표시된다. 맨 위의 청록색 선은 NEW에서 실제 peak가 관측된 frame에만 그린 frequency track이다.</p>
 <p><b>선택 sample 다시 읽기</b>는 화면의 WAV와 그림을 파일에서 다시 불러온다. <b>목록 새로고침</b>은 재생성된 index.html을 다시 읽는다. 새 WAV 분석이나 분석 결과 갱신은 터미널에서 아래 명령으로 실행한 뒤 목록을 새로고침해야 한다.</p>
-<code>python -m scripts.inspect_modal_analysis "WAV_경로" --compare_legacy --legacy_modes 128 --output analysis/modal_new_review</code>
+<code>python -m scripts.inspect_modal_analysis "WAV_경로" --compare_legacy --legacy_modes 128 --output insights/modal_new_review</code>
 </div>
 """
     tail = """<script>
@@ -264,9 +264,8 @@ def inspect_file(source, output, args):
         min_length=args.min_length,
         min_relative_score_db=args.min_relative_score_db,
         refine=not args.no_refine,
-        hop_length=768 if args.fast else 256,
-        max_gap=0 if args.fast else 2,
-        fast=args.fast,
+        hop_length=256,
+        max_gap=2,
         compute_device=args.compute_device,
         gpu_cqt_batch_size=args.gpu_cqt_batch_size,
     )
@@ -305,7 +304,6 @@ def inspect_file(source, output, args):
         duration_seconds=duration,
         backend=args.backend,
         compute_device=args.compute_device,
-        fast=args.fast,
         analysis_stage_seconds=result.stage_seconds,
         mode_limit=args.num_modes,
         modes=len(result.frequencies),
@@ -348,7 +346,6 @@ def main():
     parser.add_argument("--compute_device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--gpu_cqt_batch_size", type=int, default=16)
     parser.add_argument("--no_refine", action="store_true")
-    parser.add_argument("--fast", action="store_true", help="Review the 16 ms fast preset.")
     parser.add_argument("--compare_legacy", action="store_true")
     parser.add_argument("--legacy_modes", type=int, default=64)
     parser.add_argument("--max_files", type=int, default=8)
@@ -359,11 +356,7 @@ def main():
     )
     args = parser.parse_args()
     if args.output is None:
-        args.output = Path(
-            "analysis/modal_fast_review" if args.fast else "analysis/modal_new_review"
-        )
-    if args.fast:
-        args.no_refine = True
+        args.output = Path("insights/modal_new_review")
     if args.refresh_html:
         summaries = json.loads(
             (args.output / "summary.json").read_text(encoding="utf-8")

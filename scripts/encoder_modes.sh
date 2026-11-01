@@ -80,7 +80,7 @@ drumblender_resolve_encoder_mode() {
       ;;
   esac
 
-  local cfg_path="$repo_root/cfg/upgrades/encoders/${kind}_${stem}_style.yaml"
+  local cfg_path="$repo_root/cfg/models/encoder/${kind}_${stem}_style.yaml"
   if [[ ! -f "$cfg_path" ]]; then
     printf '%s encoder config not found: %s\n' "$kind" "$cfg_path" >&2
     return 2

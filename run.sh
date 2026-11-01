@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/workspace/drumblender}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$SCRIPT_DIR}"
 CFG_PATH="${CFG_PATH:-cfg/05_all_parallel.yaml}"
 cd "$REPO_ROOT" || exit 1
 source "$REPO_ROOT/scripts/encoder_modes.sh"

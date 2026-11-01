@@ -1,6 +1,4 @@
-"""
-torchmetrics
-"""
+"""Paired reconstruction errors for spectral, temporal, and timbral fidelity."""
 from typing import Any
 import hashlib
 import importlib
@@ -35,7 +33,8 @@ def load_evaluation_metrics(config_path=None):
         return value
 
     metrics = instantiate(spec)
-    required = {"lsd", "flux_onset", "mr_stft", "mr_log_mel", "band_spectral", "log_rms_envelope"}
+    required = {"lsd", "flux_onset", "mr_stft", "mr_log_mel", "band_spectral",
+                "log_rms_envelope", "mfcc", "paired_timbre"}
     if not isinstance(metrics, torch.nn.ModuleDict) or not required.issubset(metrics):
         raise ValueError(f"Evaluation config must define {sorted(required)}")
     config_sha256 = hashlib.sha256(json.dumps(spec, sort_keys=True).encode("utf-8")).hexdigest()
@@ -149,8 +148,11 @@ class LogSpectralDistance(Metric):
 
 
 class MFCCError(Metric):
-    """
-    MFCC Error
+    """Frame-aligned MAE of natural-log mel cepstra, averaged per audio file.
+
+    C0 is excluded by default to emphasize spectral shape. Level differences
+    remain visible in the separate RMS-envelope metric. This is coefficient
+    MAE, not the dB-scaled mel-cepstral distortion (MCD) used in speech papers.
     """
 
     full_state_update = False
@@ -161,31 +163,38 @@ class MFCCError(Metric):
         n_mfcc: int = 40,
         n_fft: int = 2048,
         hop_length: int = 128,
+        n_mels: int = 128,
+        f_min: float = 20.0,
+        f_max: float = 20000.0,
+        include_c0: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        if not 1 <= n_mfcc <= n_mels or (not include_c0 and n_mfcc < 2):
+            raise ValueError("MFCC needs valid coefficient counts and at least one retained coefficient")
+        if not 0 <= f_min < f_max <= sample_rate / 2 or n_fft < 2 or hop_length < 1:
+            raise ValueError("Invalid MFCC frequency range, FFT size, or hop length")
         self.add_state("mfcc", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
         self.sample_rate = sample_rate
-        self.n_mfcc = n_mfcc
-        self.n_fft = n_fft
-        self.hop_length = hop_length
+        self.include_c0 = include_c0
+        # A fixed natural-log floor avoids per-clip dB peak normalization.
+        # Centering uses constant boundary padding, without extending the clip.
+        self.transform = torchaudio.transforms.MFCC(
+            sample_rate=sample_rate, n_mfcc=n_mfcc, log_mels=True,
+            melkwargs={"n_fft": n_fft, "hop_length": hop_length, "n_mels": n_mels,
+                       "f_min": f_min, "f_max": f_max, "norm": "slaney",
+                       "mel_scale": "slaney", "pad_mode": "constant"},
+        )
 
     def update(self, x: torch.Tensor, y: torch.Tensor) -> None:
         assert x.shape == y.shape
         assert x.ndim == 3 and x.shape[1] == 1, "Only mono audio is supported"
-        if x.shape[-1] <= self.n_fft // 2:
-            raise ValueError(f"MFCC requires more than {self.n_fft // 2} samples")
-        x = x.squeeze(1)
-        y = y.squeeze(1)
-
-        mfcc = torchaudio.transforms.MFCC(
-            sample_rate=self.sample_rate,
-            n_mfcc=self.n_mfcc,
-            melkwargs={"n_fft": self.n_fft, "hop_length": self.hop_length},
-        ).to(device=x.device, dtype=x.dtype)
-        X = mfcc(x)
-        Y = mfcc(y)
+        if x.shape[-1] == 0:
+            raise ValueError("MFCC requires nonempty audio")
+        start = 0 if self.include_c0 else 1
+        X = self.transform(x[:, 0])[:, start:]
+        Y = self.transform(y[:, 0])[:, start:]
         mae = torch.mean(torch.abs(X - Y), dim=(-2, -1))
 
         self.mfcc += torch.sum(mae)
@@ -193,6 +202,104 @@ class MFCCError(Metric):
 
     def compute(self) -> torch.Tensor:
         return self.mfcc / self.count
+
+
+class PairedTimbreDistance(torch.nn.Module):
+    """Cosine distance between CLAP channel means and population standard deviations.
+
+    Following the Huang-style representation studied by Tian et al. (2025),
+    concatenate channel statistics from every block in the selected stages.
+    This pins a specific Hugging Face backbone and preprocessing policy; it
+    is not a reproduction of every checkpoint/configuration in that paper.
+    https://arxiv.org/abs/2507.07764
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 48000,
+        model_name: str = "laion/clap-htsat-unfused",
+        revision: str | None = "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
+        stages=(0, 1, 2),
+    ):
+        super().__init__()
+        if not stages or len(set(stages)) != len(stages) or any(i < 0 for i in stages):
+            raise ValueError("CLAP stages must be distinct nonnegative indices")
+        self.sample_rate = sample_rate
+        self.model_name = model_name
+        self.revision = revision
+        self.stages = tuple(stages)
+        self.backbone = None
+        self.feature_extractor = None
+        # Remember .to(device) before lazy loading; cached reports need no model download.
+        self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
+
+    def _load_backbone(self):
+        """Load the frozen audio branch once, without the CLAP text encoder."""
+        if self.backbone is not None:
+            return
+        try:
+            from transformers import ClapAudioModel, ClapFeatureExtractor
+        except ImportError as exc:
+            raise ImportError('Paired timbre evaluation needs: pip install -e ".[evaluation]"') from exc
+        extractor = ClapFeatureExtractor.from_pretrained(self.model_name, revision=self.revision)
+        # Full CLAP checkpoints prefix this branch with audio_model.; map it
+        # explicitly so a partial load can never silently score random weights.
+        backbone, loading = ClapAudioModel.from_pretrained(
+            self.model_name, revision=self.revision,
+            key_mapping={r"^audio_model\.": ""}, output_loading_info=True,
+        )
+        if loading["missing_keys"] or loading["mismatched_keys"] or loading["error_msgs"]:
+            raise RuntimeError("CLAP audio weights were not fully restored; check the checkpoint and revision")
+        if extractor.sampling_rate != self.sample_rate:
+            raise ValueError(f"CLAP expects {extractor.sampling_rate} Hz, configured {self.sample_rate}")
+        if backbone.config.enable_fusion or max(self.stages) >= len(backbone.audio_encoder.layers):
+            raise ValueError("Paired timbre requires an unfused CLAP model with the selected stages")
+        self.feature_extractor = extractor
+        self.backbone = backbone.to(self._device_anchor.device).eval().requires_grad_(False)
+
+    def _style_vectors(self, pair):
+        """Extract [mean, std] per channel over all spatial tokens of each block."""
+        statistics = []
+
+        def collect(module, inputs, output):
+            features = output[0].float()  # Swin block output: [pair, spatial tokens, channels].
+            statistics.append(torch.cat((features.mean(dim=1),
+                                         features.std(dim=1, unbiased=False)), dim=-1))
+
+        handles = [block.register_forward_hook(collect)
+                   for i in self.stages for block in self.backbone.audio_encoder.layers[i].blocks]
+        try:
+            # Fixed-window zero padding is part of this learned metric's definition.
+            # Never repeat hits or let the processor randomly crop longer inputs.
+            features = self.feature_extractor(
+                list(pair.detach().cpu().float().numpy()), sampling_rate=self.sample_rate,
+                padding="pad", truncation="rand_trunc", return_tensors="pt",
+            ).to(self._device_anchor.device)
+            self.backbone(**features)
+        finally:
+            for handle in handles:
+                handle.remove()
+        return torch.cat(statistics, dim=-1)
+
+    @torch.no_grad()
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if pred.shape != target.shape or pred.ndim != 3 or pred.shape[:2] != (1, 1):
+            raise ValueError("Paired timbre expects matching [1, 1, samples] audio")
+        if pred.shape[-1] == 0 or not (torch.isfinite(pred).all() and torch.isfinite(target).all()):
+            raise ValueError("Paired timbre requires nonempty, finite audio")
+        self._load_backbone()
+        self.backbone.eval()  # Parent .train() calls must not enable CLAP dropout.
+        window = self.feature_extractor.nb_max_samples
+        total = pred.new_zeros((), device=self._device_anchor.device, dtype=torch.float32)
+        # Nonoverlapping, aligned windows cover the full clip, including a short tail.
+        # Weight by real sample count so the padded final window is not overrepresented.
+        for offset in range(0, pred.shape[-1], window):
+            pair = torch.cat((pred[0, :, offset:offset + window],
+                              target[0, :, offset:offset + window]), dim=0)
+            style = self._style_vectors(pair)
+            distance = (1 - torch.nn.functional.cosine_similarity(style[:1], style[1:])).clamp(0, 2)
+            total += distance.squeeze(0) * pair.shape[-1]
+        return total / pred.shape[-1]
 
 
 class MultiResolutionLogMelDistance(torch.nn.Module):

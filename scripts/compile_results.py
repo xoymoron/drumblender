@@ -51,6 +51,7 @@ RANK_METRICS = [
     # Retain the CSV key for compatibility; it now stores temporal spectral flux.
     ("SF", "test/flux_onset"),
 ]
+DIAGNOSTIC_LABELS = {"test/mfcc": "MFCC", "test/paired_timbre": "Paired timbre"}
 SUMMARY_HEADERS = [
     "bundle",
     "pack",
@@ -201,6 +202,7 @@ def _sample_name(row: Dict[str, object]) -> str:
 def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
     """Rescore paired WAVs and refresh the per-file cache for this bundle."""
     metric_rows = []
+    device = next(metrics.buffers()).device
     for source in loss_rows:
         src_rel = str(source.get("source_filename", "")).replace("\\", "/")
         fingerprint = audio_pair_fingerprint(bundle_dir, src_rel)
@@ -216,8 +218,8 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
         if not 0 < length <= target.shape[-1]:
             raise ValueError(f"Invalid manifest length: {src_rel}")
         # Older bundles may contain right padding; score only the recorded valid length.
-        scores = score_reconstruction(metrics, recon[None, :, :length],
-                                      target[None, :, :length], sample_rate=sr_t)
+        scores = score_reconstruction(metrics, recon[None, :, :length].to(device),
+                                      target[None, :, :length].to(device), sample_rate=sr_t)
         row = dict(source)
         row.update(scores)
         row.update({"sample_pack_key": _row_pack(source),
@@ -492,7 +494,8 @@ def _write_dashboard(path, bundles):
         secondary = sorted(key for key in rows[0]
                            if key.startswith("test/") and key not in primary
                            and key != "test/loss")
-        plots = RANK_METRICS + [(key.removeprefix("test/").replace("_", " ").title(), key)
+        plots = RANK_METRICS + [(DIAGNOSTIC_LABELS.get(
+                                    key, key.removeprefix("test/").replace("_", " ").title()), key)
                                 for key in secondary]
         for label, column in plots:
             is_secondary = column not in primary
@@ -569,6 +572,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Optional explicit path for the summary TeX table.",
     )
     parser.add_argument("--recompute", action="store_true", help="Ignore cached metrics and rescore WAV pairs.")
+    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda",
+                        help="Metric device; falls back to CPU if CUDA is unavailable.")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -581,6 +586,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Comparisons are valid only when every bundle uses the same metric configuration.
     if len({config_sha256 for _, _, config_sha256 in configured_bundles}) != 1:
         raise ValueError("Cannot combine runs using different evaluation metric configurations")
+    device = "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
+    # All bundles share one frozen CLAP instance, loaded only if scores need refreshing.
+    metrics = configured_bundles[0][1].to(device)
 
     # Keep a single bundle's reports beside it; combine run reports at the root.
     if args.report_dir is not None:
@@ -598,7 +606,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     pack_macro = []
 
     # Validate caches and summarize each bundle before writing combined reports.
-    for bundle_dir, metrics, config_sha256 in configured_bundles:
+    for bundle_dir, _, config_sha256 in configured_bundles:
         summary_path = bundle_dir / "evaluation" / "summary.json"
         with summary_path.open("r", encoding="utf-8") as f:
             summary = json.load(f)

@@ -1,20 +1,15 @@
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_all --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/percussion.yaml
-rm logs/config.yaml
+#!/usr/bin/env bash
+set -euo pipefail
 
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_a --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_a.yaml
-rm logs/config.yaml
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+CHECKPOINT="${1:?usage: bash scripts/reconstruction_modal.sh modal_checkpoint [data_yaml]}"
+DATA_CFG="${2:-$REPO_ROOT/cfg/data/custom_all.yaml}"
+CHECKPOINT="$(cd -- "$(dirname -- "$CHECKPOINT")" && pwd)/$(basename -- "$CHECKPOINT")"
+DATA_CFG="$(cd -- "$(dirname -- "$DATA_CFG")" && pwd)/$(basename -- "$DATA_CFG")"
+cd "$REPO_ROOT"
 
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_e --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_e.yaml
-rm logs/config.yaml
-
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_cymbals --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_cymbals.yaml
-rm logs/config.yaml
-
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_kick --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_kick.yaml
-rm logs/config.yaml
-
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_snare --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_snare.yaml
-rm logs/config.yaml
-
-drumblender test -c cfg/06_modal.yaml --trainer.logger CSVLogger --trainer.logger.name modal_tom --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_tom.yaml
-rm logs/config.yaml
+drumblender test -c "$REPO_ROOT/cfg/06_modal.yaml" \
+  --ckpt_path "$CHECKPOINT" \
+  --trainer.logger CSVLogger --trainer.logger.name modal_all \
+  --model.test_metrics "$REPO_ROOT/cfg/metrics/drumblender_metrics.yaml" \
+  --data "$DATA_CFG"

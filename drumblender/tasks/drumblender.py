@@ -5,7 +5,6 @@ import inspect
 from typing import Callable
 from typing import Literal
 from typing import Optional
-from typing import Tuple
 from typing import Union
 
 import pytorch_lightning as pl

@@ -181,11 +181,6 @@ def parse_args(argv=None, default_backend="legacy"):
         action="store_true",
         help="Disable complex-lobe fitting and phase frequency refinement in NEW.",
     )
-    ap.add_argument(
-        "--fast",
-        action="store_true",
-        help="NEW only: use a 16 ms grid and skip costly peak refinement.",
-    )
 
     # behavior
     ap.add_argument("--seed", type=int, default=5152845)
@@ -256,14 +251,6 @@ def parse_args(argv=None, default_backend="legacy"):
     )
     args = ap.parse_args(argv)
     is_new = args.modal_backend != "legacy"
-    if args.fast:
-        if not is_new:
-            ap.error("--fast is only supported by the NEW analyzer")
-        args.hop_length = 768
-        args.no_refine = True
-        # One fast frame spans the old three-frame gap budget (16 ms).
-        # Avoid joining unrelated peaks across a 48 ms silent interval.
-        args.max_gap = 0
     if args.num_modes is None:
         args.num_modes = 128 if is_new else 64
     if args.min_length is None:
@@ -286,7 +273,7 @@ def parse_args(argv=None, default_backend="legacy"):
         args.processed_root = "../dataset/processed"
     if args.out_dir is None:
         directory = (
-            f"processed_modal_{'fast' if args.fast else 'new'}{args.num_modes}"
+            f"processed_modal_new{args.num_modes}"
             if is_new
             else "processed_modal_flat"
         )
@@ -311,7 +298,7 @@ def main(default_backend="legacy"):
     if args.resume and config_path.exists():
         previous = json.loads(config_path.read_text(encoding="utf-8"))
         for name, value in vars(args).items():
-            previous_value = previous.get(name, False if name == "fast" else None)
+            previous_value = previous.get(name)
             if (
                 name not in {"resume", "checkpoint_every", "max_files", "no_tqdm"}
                 and previous_value != value
@@ -375,7 +362,6 @@ def main(default_backend="legacy"):
             min_relative_score_db=args.min_relative_score_db,
             min_prominence_db=args.min_prominence_db,
             refine=not args.no_refine,
-            fast=args.fast,
             compute_device=args.compute_device,
             gpu_cqt_batch_size=args.gpu_cqt_batch_size,
         )

@@ -137,7 +137,7 @@ Run: `python -m pytest test/unit/models/test_texture.py --confcutdir=test/unit -
 `TextureState`는 `z:[1,64,T]`, `modal_ref:[1,L]`, `scale:[1,1]`, `length:int`를 가진다. Original waveform/R/U target은 training auxiliary에만 있고 render state에는 없다. Public cache는 detach하고, training의 internal analysis는 gradient를 유지한다. Controls는 Task 6의 SAE adapter가 state.z에 적용한다. `modal_override`는 cached modal waveform을 대체할 `[B,1,Lmax]`이며 재분석하지 않는다.
 
 - [ ] unequal-length batch와 개별 forward의 유효 samples가 같은지, neutral cached render와 forward가 같은지 tests를 작성한다. modal_override만 변경하면 texture component가 동일한지 확인한다.
-- [ ] reference 구현은 batch item마다 true length로 analysis/encoder/decoder를 호출하고 마지막에 waveform을 pad한다. Params도 frame_lengths로 slice한다. 이렇게 padding에 따른 global context/conv contamination을 먼저 제거한다. 이후 vectorization은 동일성 test 아래에서만 진행한다.
+- [ ] reference 구현은 batch item마다 true length로 insights/encoder/decoder를 호출하고 마지막에 waveform을 pad한다. Params도 frame_lengths로 slice한다. 이렇게 padding에 따른 global context/conv contamination을 먼저 제거한다. 이후 vectorization은 동일성 test 아래에서만 진행한다.
 - [ ] reference modal은 기존 ModalSynth를 사용하고 freeze한다. modal cache에서 쓰는 radians/sample/initial-phase convention을 유지한다. Config의 num_modes와 cache metadata가 다르면 명시적으로 reject한다.
 - [ ] training helper `forward_with_aux`는 prediction과 R/U*/log_A*/predicted q/U를 반환한다. Public forward는 waveform만 반환한다. Loss는 spec의 waveform/complexMR/magnitudeMR/envelope/flux/A/U 정의를 구현한다. Metrics 전용 기존 MR-STFT 이름과 수치는 변경하지 않는다.
 - [ ] `drumblender.loss.complex_mr_loss(prediction:Tensor,target:Tensor,lengths:Tensor)->Tensor`를 독립 함수로 제공한다. Public `loss_fn`은 spec의 waveform/complexMR/magnitudeMR/envelope/flux 항만 사용하고 A/U auxiliary는 `forward_with_aux`의 training objective에 더한다.
@@ -167,7 +167,6 @@ Run: `python -m pytest test/unit/test_texture_task.py test/unit/test_texture_los
 ```toml
 [tool.setuptools.packages.find]
 include = ["drumblender*"]
-exclude = ["drumblender_OG*"]
 ```
 
 - [ ] `diagnose_texture.py`는 manifest JSON을 입력받아 DSP closure, oracle/free-coefficient diagnostic, 32-sample overfit용 subset과 metrics JSON을 만든다. Manifest에는 sample id/path/hash/type/split/valid length/modal hash/model config hash/seed를 기록한다. Synthetic impulse/flam/HF-burst cases도 저장한다.
@@ -178,8 +177,8 @@ Run: `python -m pytest test/integration/test_texture_roundtrip.py -o addopts= -q
 Diagnostic CLI contract to implement:
 
 ```text
-python -m scripts.diagnose_texture --build-manifest --data-config cfg/data/texture.yaml --manifest analysis/texture/manifest.json --seed 0
-python -m scripts.diagnose_texture --manifest analysis/texture/manifest.json --output analysis/texture/diagnostic --seed 0
+python -m scripts.diagnose_texture --build-manifest --data-config cfg/data/texture.yaml --manifest insights/texture/manifest.json --seed 0
+python -m scripts.diagnose_texture --manifest insights/texture/manifest.json --output insights/texture/diagnostic --seed 0
 drumblender fit --config cfg/06_texture.yaml --trainer.max_steps 20000
 ```
 
@@ -210,7 +209,7 @@ Run: `python -m pytest test/unit/control/test_sparse.py --confcutdir=test/unit -
 CLI contract:
 
 ```text
-python -m scripts.train_texture_controls --model-config cfg/06_texture.yaml --checkpoint checkpoints/texture.ckpt --config cfg/texture_controls.yaml --output analysis/texture/controls
+python -m scripts.train_texture_controls --model-config cfg/06_texture.yaml --checkpoint checkpoints/texture.ckpt --config cfg/texture_controls.yaml --output insights/texture/controls
 ```
 
 ## Task 7: Output intervention 평가와 artist audition

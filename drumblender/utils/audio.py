@@ -187,27 +187,6 @@ def cut_start_silence(
     return x[:, start_sample:]
 
 
-def is_entirely_silent(
-    x: torch.Tensor,
-    frame_size: int = 256,
-    hop_size: int = 256,
-    threshold_db: float = -65.0,
-) -> bool:
-    """
-    True if ALL frames are below threshold_db (power dB).
-    x: [C, T]
-    """
-    return (
-        first_non_silent_sample_multichannel(
-            x,
-            frame_size=frame_size,
-            hop_size=hop_size,
-            threshold_db=threshold_db,
-        )
-        is None
-    )
-
-
 def cut_end_silence(
     x: torch.Tensor,
     frame_size: int = 256,

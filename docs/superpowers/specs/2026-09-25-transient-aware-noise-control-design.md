@@ -22,12 +22,12 @@ modal은 coherent resonances를 담당하고, noise는 stochastic texture뿐 아
 
 | 현재 위치 | 확인 내용 | 설계에 미치는 영향 |
 |---|---|---|
-| `drumblender/upgrades/encoders/dac_style.py`, `cfg/upgrades/encoders/noise_dac_lstm_style.yaml` | DAC-inspired conv, stride product 128, 2-layer LSTM, 128-band output | pretrained DAC codec나 VQ가 아니다. encoder 이름만 교체해서 해결할 문제가 아니다. |
+| `drumblender/models/dac_style.py`, `cfg/models/encoder/noise_dac_lstm_style.yaml` | DAC-inspired conv, stride product 128, 2-layer LSTM, 128-band output | pretrained DAC codec나 VQ가 아니다. encoder 이름만 교체해서 해결할 문제가 아니다. |
 | `drumblender/synths/noise.py` | 예측 band magnitude로 impulse response를 만들고 매 forward 새로운 uniform noise를 filtering/overlap-add | seed 고정은 repeatability를 주지만 원음의 noise realization/phase를 복원하지 않는다. |
 | `cfg/synths/noise.yaml` | window 256, implementation hop은 window/2 | control-rate와 synthesis 제약을 함께 봐야 한다. |
 | `cfg/05_all_parallel.yaml` | modal, modal을 처리하는 parallel transient TCN, 별도로 더하는 noise | 현재 transient는 onset에만 제한된 branch가 아니다. encoder input과 synthesis wiring도 구분해야 한다. |
 | `drumblender/tasks/drumblender.py` | public forward는 waveform; 최종 waveform 중심 loss | 새 task에 auxiliary outputs/loss 경로가 필요하다. public forward는 유지한다. |
-| `drumblender/utils/modal_analysis_new.py`, `docs/modal_analysis_new.md` | hybrid CQT/STFT, confidence/observed/source metadata, 기본 최대 128 modes | metadata를 공유하되 residual을 clean noise target이라고 부르면 안 된다. |
+| `drumblender/utils/modal_analysis_new.py`, [modal guide](../../modal.md#analysis) | hybrid CQT/STFT, confidence/observed/source metadata, 기본 최대 128 modes | metadata를 공유하되 residual을 clean noise target이라고 부르면 안 된다. |
 | `scripts/build_modal_features.py` | 저장 feature는 `[3,M,F]` tensor | 분석 metadata가 학습 feature에 아직 연결되지 않았다. |
 | `drumblender/data/collate.py` | metadata dict의 가변 시간축을 padding하지 못함 | 새 dataset/collate 경로를 추가한다. |
 | `drumblender/utils/model.py` | loader parser 및 constructor introspection이 DrumBlender에 묶임 | 새 Lightning task를 평가/export하려면 loader도 연결해야 한다. |

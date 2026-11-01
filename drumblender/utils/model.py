@@ -1,11 +1,11 @@
 """
 Helpful utils for handling pre-trained models
 """
+
 import inspect
 from typing import Any
 from typing import Union
 
-import yaml
 from jsonargparse import ArgumentParser
 
 from drumblender.data import AudioDataModule
@@ -56,31 +56,3 @@ def load_model(config: str, ckpt: str, include_data: bool = False):
         return model, datamodule
 
     return model, None
-
-
-def load_datamodule(config: str):
-    """
-    Load a datamodule from a config file
-    """
-    datamodule_parser = ArgumentParser()
-    datamodule_parser.add_subclass_arguments(AudioDataModule, "datamodule")
-    if config is not None:
-        with open(config, "r") as f:
-            config = yaml.safe_load(f)
-            config = {"datamodule": config}
-            datamodule_args = datamodule_parser.parse_object(config)
-            datamodule = datamodule_parser.instantiate_classes(
-                datamodule_args
-            ).datamodule
-
-    return datamodule
-
-
-def load_config_yaml(config: str):
-    """
-    Load a config file
-    """
-    with open(config, "r") as f:
-        config = yaml.safe_load(f)
-
-    return config

@@ -32,15 +32,3 @@ def resolve_device(device: Union[str, torch.device] = "cpu") -> torch.device:
             raise ValueError(f"CUDA device index {index} is not available.")
         selected = torch.device("cuda", index)
     return selected
-
-
-def check_device(device: torch.device) -> None:
-    """Fail before processing files if a CUDA kernel cannot run on this GPU."""
-    if device.type == "cuda":
-        try:
-            torch.ones(1, device=device).square().sum().item()
-        except RuntimeError as exc:
-            raise RuntimeError(
-                f"Cannot execute CUDA kernels on {device}. Check that the "
-                "installed PyTorch build supports this GPU and its driver."
-            ) from exc

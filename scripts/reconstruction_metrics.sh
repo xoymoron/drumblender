@@ -1,8 +1,17 @@
-drumblender test -c $1/$2.yaml --ckpt_path $1/$2.ckpt --trainer.logger CSVLogger --trainer.logger.name $2"_all" --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/percussion.yaml
-rm logs/config.yaml
+#!/usr/bin/env bash
+set -euo pipefail
 
-drumblender test -c $1/$2.yaml --ckpt_path $1/$2.ckpt --trainer.logger CSVLogger --trainer.logger.name $2"_a" --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_a.yaml
-rm logs/config.yaml
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+MODEL_DIR="${1:?usage: bash scripts/reconstruction_metrics.sh model_dir model_name [data_yaml]}"
+MODEL_NAME="${2:?provide model_name without .yaml or .ckpt}"
+DATA_CFG="${3:-$REPO_ROOT/cfg/data/custom_all.yaml}"
+# Resolve caller-supplied paths before switching to the repository root.
+MODEL_DIR="$(cd -- "$MODEL_DIR" && pwd)"
+DATA_CFG="$(cd -- "$(dirname -- "$DATA_CFG")" && pwd)/$(basename -- "$DATA_CFG")"
+cd "$REPO_ROOT"
 
-drumblender test -c $1/$2.yaml --ckpt_path $1/$2.ckpt --trainer.logger CSVLogger --trainer.logger.name $2"_e" --model.test_metrics cfg/metrics/drumblender_metrics.yaml --data cfg/data/filtered/percussion_e.yaml
-rm logs/config.yaml
+drumblender test -c "$MODEL_DIR/$MODEL_NAME.yaml" \
+  --ckpt_path "$MODEL_DIR/$MODEL_NAME.ckpt" \
+  --trainer.logger CSVLogger --trainer.logger.name "${MODEL_NAME}_all" \
+  --model.test_metrics "$REPO_ROOT/cfg/metrics/drumblender_metrics.yaml" \
+  --data "$DATA_CFG"
