@@ -18,6 +18,8 @@ Modal 분석, feature 추출, 결과 확인, neural control의 실행 방법을 
 구현은 [modal_analysis_new.py](../drumblender/utils/modal_analysis_new.py)의 `CQTModalAnalysis`다.
 [modal_analysis.py](../drumblender/utils/modal_analysis.py)는 실제 peak 관측을 구분하는 legacy/ampzero baseline이다.
 Legacy가 원 논문의 수정 없는 tracker와 같다는 뜻은 아니다.
+[modal_analysis_original.py](../drumblender/utils/modal_analysis_original.py)는 로컬 Git의
+`1a717e525ff70ae9dcb9cee7e3afd1bc71afb7bb`에서 변경 없이 복원한 원본 tracker다.
 
 기본 Hybrid의 signal path:
 
@@ -143,6 +145,30 @@ WAV와 feature는 sample마다 저장하지만 metadata에 아직 기록되지 �
 비정상 종료 후 resume에서 다시 분석할 수 있다.
 `--checkpoint_every 20`은 복구할 분량을 줄이는 대신 metadata 전체 재기록 횟수를 늘린다.
 대량 추출에는 기본 100을 출발값으로 사용한다.
+
+### Original CQT baseline
+
+`original`은 jorshi DrumBlender의 nnAudio CQT + 원본 tracker이며,
+ampzero 수리가 들어간 `legacy` 및 NEW 구현의 `cqt` backend와 구분한다.
+원본 tracker는 그대로 두고 실행 wrapper에서 nnAudio transform/input만 GPU로 옮긴다.
+Tracking은 원본처럼 CPU에서 실행한다. 원본의 placeholder/track-selection 동작도 보존한다.
+
+```bash
+python -u -m scripts.build_modal_features_multi_gpu \
+  --modal_backend original --gpus 0,1 --num_modes 64 \
+  --processed_root ../dataset/processed \
+  --out_dir ../dataset/modal_features/processed_modal_original64_2gpu \
+  --checkpoint_every 100 --resume
+```
+
+원본 기본값은 64 modes, hop 256, fmin 20 Hz, 24 bins/octave, 240 bins,
+min length 10, threshold -80 dB, diff threshold 5다.
+동일 mode ceiling으로 비교하려면 `--num_modes 128`과 별도 output을 사용한다.
+이 명령은 현재 processed sample 길이를 사용한다. 원 논문의 2초 고정 dataset protocol을
+재현한 것은 아니며, 짧은 파일은 기존 nnAudio reflect-padding fallback이 추가 padding 후 재시도한다.
+`analysis_num_samples`에 실제 분석 길이를 기록하므로 길이와 padding을 확인한 뒤 시간을 비교한다.
+`analysis_seconds`와 `file_seconds`는 원본에도 기록하지만 NEW의 단계별/source/confidence 진단은 없다.
+GPU 실행 연결과 CPU 실행 검증을 GPU 장비에서의 속도 보장으로 해석하지 않는다.
 
 ### Outputs and timing
 

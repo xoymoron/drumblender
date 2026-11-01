@@ -129,14 +129,14 @@ def parse_args(argv=None, default_backend="legacy"):
     ap.add_argument("--sample_rate", type=int, default=48000)
     ap.add_argument(
         "--modal_backend",
-        choices=("legacy", "hybrid", "stft", "cqt"),
+        choices=("original", "legacy", "hybrid", "stft", "cqt"),
         default=default_backend,
     )
     ap.add_argument(
         "--num_modes",
         type=int,
         default=None,
-        help="Mode ceiling: legacy=64, NEW=128 by default.",
+        help="Mode ceiling: original/legacy=64, NEW=128 by default.",
     )
 
     ap.add_argument("--hop_length", type=int, default=256)
@@ -147,13 +147,13 @@ def parse_args(argv=None, default_backend="legacy"):
         "--min_length",
         type=int,
         default=None,
-        help="Actual peak observations: legacy=10, NEW=4 by default.",
+        help="Minimum track length: original/legacy=10, NEW=4 by default.",
     )
     ap.add_argument(
         "--threshold_db",
         type=float,
         default=None,
-        help="Amplitude floor: legacy=-80, NEW=-90 dBFS.",
+        help="Amplitude floor: original/legacy=-80, NEW=-90 dBFS.",
     )
     ap.add_argument("--diff_threshold", type=float, default=5.0)
     ap.add_argument("--cqt_max_frequency", type=float, default=700.0)
@@ -168,7 +168,7 @@ def parse_args(argv=None, default_backend="legacy"):
         "--compute_device",
         choices=("cpu", "cuda"),
         default="cpu",
-        help="NEW only: CQT/STFT FFTs run here; peak tracking stays on CPU.",
+        help="Spectral transforms run here; peak tracking stays on CPU.",
     )
     ap.add_argument(
         "--gpu_cqt_batch_size",
@@ -250,7 +250,7 @@ def parse_args(argv=None, default_backend="legacy"):
         help="If >0, skip files shorter than this (ms). Set 0 to not skip.",
     )
     args = ap.parse_args(argv)
-    is_new = args.modal_backend != "legacy"
+    is_new = args.modal_backend not in ("original", "legacy")
     if args.num_modes is None:
         args.num_modes = 128 if is_new else 64
     if args.min_length is None:
@@ -267,15 +267,17 @@ def parse_args(argv=None, default_backend="legacy"):
         ap.error("--gpu_cqt_batch_size must be positive")
     if args.write_split and args.num_shards > 1:
         ap.error("--write_split is not supported with sharded extraction")
-    if not is_new and args.compute_device != "cpu":
-        ap.error("--compute_device cuda is only supported by the NEW analyzer")
     if args.processed_root is None:
         args.processed_root = "../dataset/processed"
     if args.out_dir is None:
         directory = (
             f"processed_modal_new{args.num_modes}"
             if is_new
-            else "processed_modal_flat"
+            else (
+                f"processed_modal_original{args.num_modes}"
+                if args.modal_backend == "original"
+                else "processed_modal_flat"
+            )
         )
         args.out_dir = str(Path("../dataset/modal_features") / directory)
     if args.num_shards > 1:
@@ -286,7 +288,7 @@ def parse_args(argv=None, default_backend="legacy"):
 @torch.no_grad()
 def main(default_backend="legacy"):
     args = parse_args(default_backend=default_backend)
-    is_new = args.modal_backend != "legacy"
+    is_new = args.modal_backend not in ("original", "legacy")
 
     processed_root = Path(args.processed_root)
     if not processed_root.exists():
@@ -365,6 +367,10 @@ def main(default_backend="legacy"):
             compute_device=args.compute_device,
             gpu_cqt_batch_size=args.gpu_cqt_batch_size,
         )
+    elif args.modal_backend == "original":
+        from drumblender.utils.modal_analysis_original import CQTModalAnalysis
+
+        analyzer_class = CQTModalAnalysis
     else:
         from drumblender.utils.modal_analysis import CQTModalAnalysis
 
@@ -381,6 +387,10 @@ def main(default_backend="legacy"):
         diff_threshold=args.diff_threshold,
         **new_options,
     )
+    if not is_new:
+        # Keep the original tracker unchanged: only its nnAudio transform and
+        # waveform move to CUDA; __call__ already brings spectra back to CPU.
+        modal.cqt.to(args.compute_device)
     config_path.write_text(json.dumps(vars(args), indent=2), encoding="utf-8")
 
     meta: Dict[str, Dict] = (
@@ -459,10 +469,11 @@ def main(default_backend="legacy"):
 
     def extract_feat(w: torch.Tensor):
         """
-        returns feat: (3, M, F)  where M can be 0..num_modes
-        if M==0, return zeros (3, 0, F) instead of crashing.
+        Return (features, optional NEW diagnostics, analysis seconds).
+        Features have shape (3, M, F), including (3, 0, F) for no modes.
         """
         result = None
+        analysis_started = perf_counter()
         try:
             if is_new:
                 # Keep NEW's observation masks, gate counts, and stage timings
@@ -473,25 +484,32 @@ def main(default_backend="legacy"):
                     for values in result.parameters()
                 )
             else:
-                modal_freqs, modal_amps, modal_phases = modal(w)
+                modal_freqs, modal_amps, modal_phases = modal(
+                    w.to(args.compute_device)
+                )
         except RuntimeError as e:
             msg = str(e)
             # Older analyzers stack an empty list when no mode survives.
             if "non-empty TensorList" in msg:
                 F = num_frames_from_len(int(w.shape[-1]), args.hop_length)
                 z = w.new_zeros((3, 0, F))
-                return z, None
+                return z, None, perf_counter() - analysis_started
             raise
+
+        analysis_seconds = (
+            result.analysis_seconds if result is not None
+            else perf_counter() - analysis_started
+        )
 
         # Preserve the analyzer's exact frame grid, including silent NEW input.
         if modal_freqs.numel() == 0 or modal_freqs.shape[1] == 0:
             F = modal_freqs.shape[-1]
-            return w.new_zeros((3, 0, F)), result
+            return w.new_zeros((3, 0, F)), result, analysis_seconds
 
         modal_freqs = 2 * torch.pi * modal_freqs / args.sample_rate
         feat = torch.stack([modal_freqs, modal_amps, modal_phases])  # (3,1,M,F)
         feat = feat.squeeze(1)  # (3,M,F)
-        return feat, result
+        return feat, result, analysis_seconds
 
     def infer_required_length_from_padding_error(msg: str, current_len: int) -> int:
         # Parse nnAudio/torch padding errors and choose a safe retry length.
@@ -559,8 +577,9 @@ def main(default_backend="legacy"):
                 wav = right_pad_to(wav, args.pad_to)
 
             # extract with retry for reflect padding errors from CQT
+            analysis_num_samples = int(wav.shape[-1])
             try:
-                feat, result = extract_feat(wav)
+                feat, result, analysis_seconds = extract_feat(wav)
             except RuntimeError as e:
                 msg = str(e)
                 if (not args.pad_short) or (
@@ -575,7 +594,8 @@ def main(default_backend="legacy"):
                     msg, int(wav.shape[-1])
                 )
                 wav_try = right_pad_to(wav, target)
-                feat, result = extract_feat(wav_try)
+                analysis_num_samples = int(wav_try.shape[-1])
+                feat, result, analysis_seconds = extract_feat(wav_try)
 
             # force fixed num_modes
             p, m, f = feat.shape
@@ -599,6 +619,7 @@ def main(default_backend="legacy"):
                 "instrument": inst_name,
                 "type": type_name,
                 "num_samples": int(wav.shape[-1]),
+                "analysis_num_samples": analysis_num_samples,
                 "orig_relpath": str(rel),
                 "modal_backend": args.modal_backend,
                 "modal_slots": args.num_modes,
@@ -606,6 +627,8 @@ def main(default_backend="legacy"):
             }
             if result is not None:
                 meta_item.update(result_details(result, args.cqt_max_frequency))
+            else:
+                meta_item["analysis_seconds"] = round(analysis_seconds, 6)
             meta_item["file_seconds"] = round(perf_counter() - file_started, 6)
             if split_by_index is not None:
                 meta_item["split"] = split_by_index[idx]

@@ -1,4 +1,4 @@
-"""Extract NEW modal features with independent CPU or GPU workers.
+"""Extract modal features with independent CPU or GPU workers.
 
 Each worker runs an independent shard in a child process. Once every shard
 finishes, the metadata merger verifies complete coverage of the processed WAVs.
@@ -63,7 +63,12 @@ def main():
         type=Path,
         default=None,
     )
-    parser.add_argument("--num_modes", type=int, default=128)
+    parser.add_argument(
+        "--modal_backend", choices=("original", "legacy", "hybrid", "stft", "cqt"),
+        default="hybrid",
+        help="original: upstream CQT tracker; legacy: ampzero-aware CQT; hybrid: NEW.",
+    )
+    parser.add_argument("--num_modes", type=int, default=None)
     parser.add_argument("--checkpoint_every", type=int, default=100)
     parser.add_argument("--gpu_cqt_batch_size", type=int, default=16)
     parser.add_argument("--resume", action="store_true")
@@ -71,6 +76,9 @@ def main():
         "--dry_run", action="store_true", help="Print worker commands without running"
     )
     args = parser.parse_args()
+    is_new = args.modal_backend not in ("original", "legacy")
+    if args.num_modes is None:
+        args.num_modes = 128 if is_new else 64
     if args.num_modes < 1 or args.checkpoint_every < 1 or args.gpu_cqt_batch_size < 1:
         parser.error(
             "Mode count, checkpoint interval, and CQT batch size must be positive"
@@ -92,8 +100,9 @@ def main():
 
     repository = Path(__file__).resolve().parents[1]
     processed_root = (repository / args.processed_root).resolve()
+    backend_name = "new" if is_new else args.modal_backend
     requested_output = args.out_dir or Path(
-        f"../dataset/modal_features/processed_modal_new{args.num_modes}"
+        f"../dataset/modal_features/processed_modal_{backend_name}{args.num_modes}"
         f"{'_cpu' if args.cpu_workers else ''}"
     )
     out_dir = (repository / requested_output).resolve()
@@ -106,6 +115,8 @@ def main():
             sys.executable,
             "-m",
             "scripts.build_modal_features_new",
+            "--modal_backend",
+            args.modal_backend,
             "--processed_root",
             str(processed_root),
             "--out_dir",
