@@ -4,9 +4,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from drumblender.models.components import AttentionPooling
-from drumblender.models.components import FiLM
-from drumblender.models.components import Pad
+from drumblender.models.components import AttentionPooling, FiLM, Pad
 
 
 class _SoundStreamResidualUnit(nn.Module):
@@ -162,10 +160,19 @@ class SoundStreamEncoder(nn.Module):
             nn.Conv1d(hidden_channels, output_channels, 3, padding=0),
         )
         self.transpose_output = transpose_output
+        self.minimum_input_length = 1
+        if not causal:
+            # Noncausal even-kernel strided blocks need at least two inputs.
+            for stride in reversed(strides):
+                self.minimum_input_length = (self.minimum_input_length - 1) * stride + 2
 
     def forward(
         self, x: torch.Tensor, film_embedding: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        if x.shape[-1] < 1:
+            raise ValueError("SoundStream requires nonempty audio")
+        if x.shape[-1] < self.minimum_input_length:
+            x = nn.functional.pad(x, (0, self.minimum_input_length - x.shape[-1]))
         x = self.input(x)
 
         for encoder_block in self.encoder_blocks:

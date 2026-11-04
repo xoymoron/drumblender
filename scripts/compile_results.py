@@ -19,8 +19,10 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 
 from drumblender.metrics import (
-    audio_pair_fingerprint, evaluation_score_keys,
-    load_evaluation_metrics, score_reconstruction,
+    audio_pair_fingerprint,
+    evaluation_score_keys,
+    load_evaluation_metrics,
+    score_reconstruction,
 )
 
 try:
@@ -51,7 +53,7 @@ RANK_METRICS = [
     # Retain the CSV key for compatibility; it now stores temporal spectral flux.
     ("SF", "test/flux_onset"),
 ]
-DIAGNOSTIC_LABELS = {"test/mfcc": "MFCC", "test/paired_timbre": "Paired timbre"}
+DIAGNOSTIC_LABELS = {"test/mfcc": "MFCC"}
 SUMMARY_HEADERS = [
     "bundle",
     "pack",
@@ -119,10 +121,14 @@ def _latex_escape(value: object) -> str:
         "&": r"\&",
         "%": r"\%",
         "#": r"\#",
+        "$": r"\$",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
     }
-    for src, dst in replacements.items():
-        text = text.replace(src, dst)
-    return text
+    # Escape original characters only; generated TeX commands must stay intact.
+    return "".join(replacements.get(char, char) for char in text)
 
 
 def _read_csv(path: Path) -> List[Dict[str, str]]:
@@ -222,7 +228,8 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
                                       target[None, :, :length].to(device), sample_rate=sr_t)
         row = dict(source)
         row.update(scores)
-        row.update({"sample_pack_key": _row_pack(source),
+        # Preserve split provenance; top-level grouping belongs only to reports.
+        row.update({"sample_pack_key": source.get("sample_pack_key") or _row_pack(source),
                     "metric_config_sha256": config_sha256,
                     "audio_sha256": fingerprint})
         metric_rows.append(row)
@@ -253,8 +260,7 @@ def _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
         return False
     for row, source in zip(rows, loss_rows):
         # Reject changes in sample order, metric setup, scores, or paired WAV content.
-        if any(row.get(key) != source.get(key)
-               for key in ("meta_key", "source_filename", "length")):
+        if any(row.get(key) != value for key, value in source.items()):
             return False
         if row.get("metric_config_sha256") != config_sha256:
             return False
@@ -353,7 +359,7 @@ def _summary_latex(summary_rows: List[Dict[str, object]]) -> str:
         bundle = _latex_escape(row["bundle"]) if row["bundle"] != previous_bundle else ""
         pack = _latex_escape(row["pack"])
         n_items = _latex_escape(row["items"])
-        def cell(prefix):
+        def cell(prefix, row=row):
             mean = _fmt_float(_to_float(row[f"{prefix}_mean"]), 3)
             std = _fmt_float(_to_float(row[f"{prefix}_std"]), 3)
             return f"${mean} \\pm {std}$"
@@ -462,14 +468,15 @@ def _distribution_stats(bundle, rows):
             values = [_to_float(row[column]) for row in examples]
             if not values or not all(map(math.isfinite, values)):
                 raise ValueError(f"Invalid {label} scores in {bundle}/{group}")
-            # SEM and quantiles complement the per-file mean and population spread.
+            # Keep population SD for the observed set; estimate SEM with sample SD.
             mean, std = _mean_std(values)
+            sem = statistics.stdev(values) / math.sqrt(len(values)) if len(values) > 1 else None
             p05, p25, median, p75, p95, p99 = _percentiles(
                 values, (.05, .25, .5, .75, .95, .99)
             )
             result.append({"bundle": bundle, "group": group, "metric": label,
                            "n": len(values), "mean": mean, "std": std,
-                           "sem": std / math.sqrt(len(values)),
+                           "sem": sem,
                            "p05": p05, "p25": p25, "median": median,
                            "p75": p75, "p95": p95, "p99": p99,
                            "min": min(values), "max": max(values)})
@@ -505,7 +512,8 @@ def _write_dashboard(path, bundles):
             # SF is long-tailed, so log1p keeps the rest of its distribution visible.
             transform = math.log1p if label == "SF" else float
             upper = max(transform(max(values)) for values in arrays) or 1.0
-            scale = lambda value: PLOT_LEFT + PLOT_SPAN * transform(value) / upper
+            def scale(value, transform=transform, upper=upper):
+                return PLOT_LEFT + PLOT_SPAN * transform(value) / upper
             height = PLOT_BASE_HEIGHT + len(groups) * PLOT_ROW_HEIGHT
             parts.append(f'<h3>{label}</h3><svg role="img" aria-label="{label} distributions" viewBox="0 0 {PLOT_VIEW_WIDTH} {height}">')
             for tick in range(PLOT_GRID_INTERVALS + 1):
@@ -587,7 +595,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     if len({config_sha256 for _, _, config_sha256 in configured_bundles}) != 1:
         raise ValueError("Cannot combine runs using different evaluation metric configurations")
     device = "cuda" if args.device == "cuda" and torch.cuda.is_available() else "cpu"
-    # All bundles share one frozen CLAP instance, loaded only if scores need refreshing.
     metrics = configured_bundles[0][1].to(device)
 
     # Keep a single bundle's reports beside it; combine run reports at the root.
@@ -654,7 +661,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # The HTML dashboard reads the same per-file scores as the numeric reports.
     _write_dashboard(report_dir / "dashboard.html", plot_bundles)
 
-    print(f"[compile_results] bundles: {len(summary_rows)}")
+    print(f"[compile_results] bundles: {len(bundle_dirs)}")
     print(f"[compile_results] summary: {summary_table_txt}")
     print(f"[compile_results] tex: {tex_out}")
     print(f"[compile_results] reports: {report_dir}")

@@ -104,7 +104,7 @@ def test_mrstft_aux_losses_match_plain_baseline_when_weight_zero(loss_fn):
         ),
     ],
 )
-def test_mrstft_aux_losses_match_masked_full_length_baseline_for_variable_length(loss_fn):
+def test_mrstft_aux_losses_average_valid_items_for_variable_length(loss_fn):
     pred = torch.tensor(
         [
             [[1.0, 2.0, 3.0, 50.0]],
@@ -120,15 +120,8 @@ def test_mrstft_aux_losses_match_masked_full_length_baseline_for_variable_length
         dtype=torch.float32,
     )
     lengths = torch.tensor([3, 4], dtype=torch.long)
-    mask = torch.tensor(
-        [
-            [[1.0, 1.0, 1.0, 0.0]],
-            [[1.0, 1.0, 1.0, 1.0]],
-        ],
-        dtype=torch.float32,
-    )
-
-    baseline = torch.nn.L1Loss()(pred * mask, target * mask)
+    # Every valid sample differs by 0.5; collate padding has no weight.
+    baseline = torch.tensor(0.5)
     actual = loss_fn(pred, target, lengths=lengths)
 
     torch.testing.assert_close(actual, baseline)

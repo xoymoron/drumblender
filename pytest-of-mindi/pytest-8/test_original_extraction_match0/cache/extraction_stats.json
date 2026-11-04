@@ -1,0 +1,17 @@
+{
+  "files": 1,
+  "total_seconds": 0.021079399972222745,
+  "mean_seconds_per_file": 0.021079399972222745,
+  "total_tracks": 4,
+  "total_active_tracks": 4,
+  "zero_mode_files": [],
+  "items": [
+    {
+      "path": "hit.wav",
+      "seconds": 0.011740899994038045,
+      "samples": 8193,
+      "tracks": 4,
+      "active_tracks": 4
+    }
+  ]
+}

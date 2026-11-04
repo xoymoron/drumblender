@@ -1,0 +1,1 @@
+{"0": {"filename": "0.wav", "feature_file": "0.pt", "num_samples": 1001, "split": "train", "sample_pack_key": "p"}, "1": {"filename": "1.wav", "feature_file": "1.pt", "num_samples": 2001, "split": "val", "sample_pack_key": "p"}, "2": {"filename": "2.wav", "feature_file": "2.pt", "num_samples": 3001, "split": "test", "sample_pack_key": "p"}}

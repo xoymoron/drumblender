@@ -2,18 +2,14 @@
 Helpers for loss functions.
 """
 import math
-
-from abc import ABC
-from abc import abstractmethod
-from typing import Callable
-from typing import List
-from typing import Optional
-from typing import Sequence
-from typing import Union
+from abc import ABC, abstractmethod
+from typing import Callable, List, Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from drumblender.utils.lengths import validate_lengths
 
 
 class FirstOrderDifferenceLoss(torch.nn.Module):
@@ -79,13 +75,14 @@ def _build_default_mrstft_loss() -> torch.nn.Module:
     return auraloss.freq.MultiResolutionSTFTLoss()
 
 
-class _LengthAwareMRSTFTAuxLoss(torch.nn.Module, ABC):
+class LengthAwareMRSTFTLoss(torch.nn.Module):
     """
-    Base class for MR-STFT losses with a lightweight auxiliary term.
+    Mean of MR-STFT losses evaluated independently on valid item waveforms.
 
-    The MR-STFT configuration stays identical to the plain baseline by default,
-    while auxiliary terms are computed only on valid unpadded samples when
-    `lengths` are provided.
+    STFT settings are inherited from the supplied auraloss module. Even equal-
+    length items are evaluated separately so spectral convergence cannot couple
+    their energies. Clips too short for centered reflection padding are extended
+    with zeros to the minimum supported length, independently of batch padding.
     """
 
     def __init__(self, mrstft: Optional[torch.nn.Module] = None):
@@ -100,39 +97,14 @@ class _LengthAwareMRSTFTAuxLoss(torch.nn.Module, ABC):
         max_length: int,
         device: torch.device,
     ) -> Optional[torch.Tensor]:
-        if lengths is None:
-            return None
-
-        if not torch.is_tensor(lengths):
-            lengths = torch.as_tensor(lengths, device=device)
-        else:
-            lengths = lengths.to(device=device)
-
-        lengths = lengths.reshape(-1)
-        if lengths.numel() != batch_size:
-            raise ValueError(
-                f"Expected {batch_size} lengths entries, got {lengths.numel()}."
-            )
-
-        return torch.clamp(lengths.long(), min=1, max=max_length)
+        return validate_lengths(lengths, batch_size=batch_size,
+                                max_length=max_length, device=device)
 
     @staticmethod
     def _is_uniform_length(lengths: Optional[torch.Tensor]) -> bool:
         if lengths is None:
             return True
         return bool(torch.all(lengths == lengths[0]).item())
-
-    @staticmethod
-    def _make_time_mask(
-        lengths: torch.Tensor,
-        *,
-        total_length: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        timeline = torch.arange(total_length, device=device).unsqueeze(0)
-        mask = (timeline < lengths.unsqueeze(1)).to(dtype)
-        return mask.unsqueeze(1)
 
     @staticmethod
     def _iter_valid_pairs(
@@ -148,6 +120,30 @@ class _LengthAwareMRSTFTAuxLoss(torch.nn.Module, ABC):
         for idx in range(pred.shape[0]):
             length = int(lengths[idx].item())
             yield pred[idx : idx + 1, :, :length], target[idx : idx + 1, :, :length]
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, lengths=None):
+        if pred.shape != target.shape:
+            raise ValueError(
+                f"pred and target must have identical shape, got {pred.shape} vs {target.shape}"
+            )
+        lengths = self._normalize_lengths(
+            lengths, batch_size=pred.shape[0], max_length=pred.shape[-1],
+            device=pred.device,
+        )
+        stft_losses = getattr(self.mrstft, "stft_losses", ())
+        min_length = max((term.fft_size // 2 + 1 for term in stft_losses), default=1)
+        losses = []
+        for pred_i, target_i in self._iter_valid_pairs(pred, target, lengths):
+            padding = max(0, min_length - pred_i.shape[-1])
+            if padding:
+                pred_i = F.pad(pred_i, (0, padding))
+                target_i = F.pad(target_i, (0, padding))
+            losses.append(self.mrstft(pred_i.contiguous(), target_i.contiguous()))
+        return torch.stack(losses).mean()
+
+
+class _LengthAwareMRSTFTAuxLoss(LengthAwareMRSTFTLoss, ABC):
+    """Length-aware MR-STFT with an auxiliary term on valid samples."""
 
     @staticmethod
     def _rms(x: torch.Tensor, eps: float) -> torch.Tensor:
@@ -194,22 +190,7 @@ class _LengthAwareMRSTFTAuxLoss(torch.nn.Module, ABC):
             device=pred.device,
         )
 
-        # Keep the spectral term identical to the plain baseline:
-        # padded tails are zero-masked, but the loss still sees the full padded batch.
-        if lengths is None:
-            pred_masked = pred
-            target_masked = target
-        else:
-            mask = self._make_time_mask(
-                lengths,
-                total_length=pred.shape[-1],
-                device=pred.device,
-                dtype=pred.dtype,
-            )
-            pred_masked = pred * mask
-            target_masked = target * mask
-
-        mrstft_loss = self.mrstft(pred_masked, target_masked)
+        mrstft_loss = super().forward(pred, target, lengths=lengths)
 
         if self._is_uniform_length(lengths):
             valid_length = pred.shape[-1] if lengths is None else int(lengths[0].item())
@@ -425,9 +406,8 @@ class SafeScaleInvariantMSSLoss(nn.Module):
         if lengths is None:
             return torch.ones(batch_size, 1, total_length, device=device)
 
-        if not torch.is_tensor(lengths):
-            lengths = torch.tensor(lengths, device=device)
-        lengths = lengths.to(device=device).long().clamp(min=1, max=total_length)
+        lengths = validate_lengths(lengths, batch_size=batch_size,
+                                   max_length=total_length, device=device)
         timeline = torch.arange(total_length, device=device).unsqueeze(0)
         return (timeline < lengths.unsqueeze(1)).to(torch.float32).unsqueeze(1)
 
@@ -494,6 +474,14 @@ class SafeScaleInvariantMSSLoss(nn.Module):
         ]
         if any(not hasattr(stft_loss, attr) for attr in required_attrs):
             return None
+
+        # Only the spectral branch gets the minimum extent needed for reflect
+        # padding. RMS, envelopes and duration gates retain the real clip length.
+        minimum = int(stft_loss.fft_size) // 2 + 1
+        if pred.shape[-1] < minimum:
+            padding = minimum - pred.shape[-1]
+            pred = F.pad(pred, (0, padding))
+            target = F.pad(target, (0, padding))
 
         bs, chs, _ = pred.shape
         pred_work = pred
@@ -587,6 +575,15 @@ class SafeScaleInvariantMSSLoss(nn.Module):
 
         return self._stft_loss_per_sample(loss_module, pred, target)
 
+    @staticmethod
+    def _spectral_fallback(loss_module, pred, target):
+        terms = getattr(loss_module, "stft_losses", (loss_module,))
+        minimum = max((int(getattr(term, "fft_size", 0)) // 2 + 1 for term in terms), default=1)
+        if pred.shape[-1] < minimum:
+            padding = minimum - pred.shape[-1]
+            pred, target = F.pad(pred, (0, padding)), F.pad(target, (0, padding))
+        return loss_module(pred, target)
+
     def _log_rms_envelope(self, signal: torch.Tensor, window_ms: float) -> torch.Tensor:
         frame = max(1, int(round(self.sample_rate * window_ms / 1000.0)))
         hop = max(1, frame // 2)
@@ -625,6 +622,7 @@ class SafeScaleInvariantMSSLoss(nn.Module):
             win_length=self.prior_win_length,
             window=window,
             center=True,
+            pad_mode="constant" if x.shape[-1] <= self.prior_n_fft // 2 else "reflect",
             return_complex=True,
         )
         power = spec.abs().pow(2)
@@ -804,12 +802,20 @@ class SafeScaleInvariantMSSLoss(nn.Module):
 
         return prior_loss
 
-    def forward(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        lengths: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, lengths=None) -> torch.Tensor:
+        """Average independently cropped clips, including every auxiliary term."""
+        if pred.shape != target.shape or pred.ndim != 3 or min(pred.shape) < 1:
+            raise ValueError("Expected matching nonempty audio tensors [B,C,T]")
+        lengths = validate_lengths(lengths, batch_size=pred.shape[0],
+                                   max_length=pred.shape[-1], device=pred.device)
+        counts = lengths.tolist() if lengths is not None else [pred.shape[-1]] * pred.shape[0]
+        return torch.stack([
+            self._forward_valid(pred[i:i + 1, :, :n], target[i:i + 1, :, :n],
+                                lengths=torch.tensor([n], device=pred.device))
+            for i, n in enumerate(counts)
+        ]).mean()
+
+    def _forward_valid(self, pred, target, lengths):
         if pred.shape != target.shape:
             raise ValueError(
                 f"pred and target must have identical shape, got {pred.shape} vs {target.shape}"
@@ -829,7 +835,7 @@ class SafeScaleInvariantMSSLoss(nn.Module):
         base_loss = (
             base_loss_per_sample.mean()
             if base_loss_per_sample is not None
-            else self.base_mss(pred_masked, target_masked)
+            else self._spectral_fallback(self.base_mss, pred_masked, target_masked)
         )
         if self.si_enabled:
             gate = self._compute_gate(target_rms)
@@ -844,7 +850,7 @@ class SafeScaleInvariantMSSLoss(nn.Module):
                 mss_loss = ((1.0 - gate) * base_loss_per_sample + gate * si_loss_per_sample).mean()
             else:
                 gate_mix = gate.mean()
-                si_loss = self.si_mss(pred_si, target_si)
+                si_loss = self._spectral_fallback(self.si_mss, pred_si, target_si)
                 mss_loss = (1.0 - gate_mix) * base_loss + gate_mix * si_loss
         else:
             mss_loss = base_loss

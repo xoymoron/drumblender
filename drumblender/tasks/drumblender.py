@@ -2,17 +2,15 @@
 LightningModule for drum synthesis
 """
 import inspect
-from typing import Callable
-from typing import Literal
-from typing import Optional
-from typing import Union
+from typing import Callable, Literal, Optional, Union
 
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
-from einops import rearrange
 from pytorch_lightning.loggers import WandbLogger
+
 from drumblender.metrics import score_reconstruction
+from drumblender.utils.lengths import validate_lengths
 
 
 class DrumBlender(pl.LightningModule):
@@ -90,85 +88,50 @@ class DrumBlender(pl.LightningModule):
         self._loss_accepts_lengths = self._callable_accepts_kwarg(
             self.loss_fn, "lengths"
         )
-    # def forward(
-    #     self,
-    #     original: torch.Tensor,
-    #     params: torch.Tensor,
-    # ):
-    #     # Main embeddings
-    #     embedding = None
-    #     if self.encoder is not None:
-    #         embedding = self.encoder(original)
-    #
-    #     # Modal parameter autoencoder
-    #     modal_params = params
-    #     if self.modal_autoencoder is not None:
-    #         if self.modal_autoencoder_accepts_audio:
-    #             modal_params = self.modal_autoencoder(original, params)
-    #         else:
-    #             modal_params, _ = self.modal_autoencoder(embedding, params)
-    #
-    #     noise_params = None
-    #     if self.noise_autoencoder is not None:
-    #         if self.noise_autoencoder_accepts_audio:
-    #             noise_params = self.noise_autoencoder(original)
-    #         else:
-    #             noise_params, _ = self.noise_autoencoder(embedding)
-    #
-    #     transient_params = None
-    #     if self.transient_autoencoder is not None:
-    #         if self.transient_autoencoder_accepts_audio:
-    #             transient_params = self.transient_autoencoder(original)
-    #         else:
-    #             transient_params, _ = self.transient_autoencoder(embedding)
-    #
-    #     # Synthesis
-    #     y_hat = self.modal_synth(modal_params, original.shape[-1])
-    #
-    #     if self.noise_synth is not None:
-    #         assert noise_params is not None, "Noise params must be provided"
-    #         noise = self.noise_synth(noise_params, original.shape[-1])
-    #         noise = rearrange(noise, "b n -> b () n")
-    #         if self.transient_takes_noise:
-    #             y_hat = y_hat + noise
-    #
-    #     if self.transient_synth is not None:
-    #         transient = self.transient_synth(y_hat, transient_params)
-    #
-    #         # Transient can be added in parallel or in series
-    #         if self.transient_parallel:
-    #             y_hat = y_hat + transient
-    #         else:
-    #             y_hat = transient
-    #
-    #     # Finally, if we have noise and did not add it through
-    #     # the TCN, add noise in parallel.
-    #     if self.noise_synth is not None:
-    #         if self.transient_takes_noise is False:
-    #             y_hat = y_hat + noise
-    #
-    #     return y_hat
 
-    def forward(
-        self,
-        original: torch.Tensor,
-        params: torch.Tensor,
-        lengths=None,
-    ):
+    def forward(self, original: torch.Tensor, params: torch.Tensor,
+                lengths=None, frame_lengths=None):
+        """Render valid sample/frame extents; restore padding only at the output.
+
+        Equal extents share a forward pass. Different extents never enter an
+        encoder or a FiLM normalization layer as collate-padded observations.
         """
-        Variable-length support via `lengths` (padded batch).
+        if original.ndim != 3 or original.shape[1] != 1 or min(original.shape) < 1:
+            raise ValueError("Expected nonempty mono audio [B,1,T]")
+        if params.ndim != 4 or params.shape[0] != original.shape[0] or min(params.shape) < 1:
+            raise ValueError("Expected nonempty modal parameters [B,P,M,F]")
+        batch_size, _, total_length = original.shape
+        lengths = validate_lengths(lengths, batch_size=batch_size,
+                                   max_length=total_length, device=original.device)
+        frame_lengths = validate_lengths(frame_lengths, batch_size=batch_size,
+                                         max_length=params.shape[-1], device=params.device)
+        if lengths is None and frame_lengths is None:
+            return self._forward_unpadded(original, params)
 
-        original: [B, 1, T_max]
-        params:   [B, 3, num_modes, num_frames]
-        lengths:  Optional [B] true lengths in samples
-        """
-        if lengths is not None:
-            if not torch.is_tensor(lengths):
-                lengths = torch.tensor(lengths, device=original.device)
-            else:
-                lengths = lengths.to(device=original.device)
-            lengths = torch.clamp(lengths.long(), min=1, max=original.shape[-1])
+        samples = lengths.tolist() if lengths is not None else [total_length] * batch_size
+        frames = (frame_lengths.tolist() if frame_lengths is not None
+                  else [params.shape[-1]] * batch_size)
+        groups = {}
+        for index, extent in enumerate(zip(samples, frames)):
+            groups.setdefault(extent, []).append(index)
+        results = [None] * batch_size
+        for (sample_count, frame_count), indices in groups.items():
+            valid_lengths = (lengths[indices] if lengths is not None else None)
+            rendered = self._forward_unpadded(
+                original[indices, :, :sample_count],
+                params[indices, ..., :frame_count], lengths=valid_lengths,
+            )
+            if rendered.ndim == 2:
+                rendered = rendered[:, None]
+            if rendered.shape != (len(indices), 1, sample_count):
+                raise ValueError("Synthesizer output must match the requested valid audio shape")
+            rendered = torch.nn.functional.pad(rendered, (0, total_length - sample_count))
+            for local_index, original_index in enumerate(indices):
+                results[original_index] = rendered[local_index:local_index + 1]
+        return torch.cat(results, dim=0)
 
+    def _forward_unpadded(self, original, params, lengths=None):
+        """Encode and synthesize a group with identical valid time axes."""
         # Main embeddings
         embedding = None
         if self.encoder is not None:
@@ -215,76 +178,18 @@ class DrumBlender(pl.LightningModule):
             else:
                 transient_params, _ = self.transient_autoencoder(embedding)
 
-        B, _, T_max = original.shape
-
-        def _pad_to_Tmax(x_1ch: torch.Tensor, T: int) -> torch.Tensor:
-            if x_1ch.dim() == 2:
-                x_1ch = x_1ch.unsqueeze(1)
-            t = x_1ch.shape[-1]
-            if t == T:
-                return x_1ch
-            if t > T:
-                return x_1ch[..., :T]
-            return torch.nn.functional.pad(x_1ch, (0, T - t))
-
-        # Fast path: fixed length batch
-        if lengths is None or torch.all(lengths == lengths[0]):
-            L = int(T_max if lengths is None else lengths[0].item())
-
-            y_hat = self.modal_synth(modal_params, L)
-            y_hat = _pad_to_Tmax(y_hat, T_max)
-
-            noise = None
-            if self.noise_synth is not None:
-                assert noise_params is not None, "Noise params must be provided"
-                n = self.noise_synth(noise_params, L)
-                noise = rearrange(n, "b n -> b () n")
-                noise = _pad_to_Tmax(noise, T_max)
-                if self.transient_takes_noise:
-                    y_hat = y_hat + noise
-
-            if self.transient_synth is not None:
-                transient = self.transient_synth(y_hat, transient_params)
-                y_hat = (y_hat + transient) if self.transient_parallel else transient
-
-            if self.noise_synth is not None and (self.transient_takes_noise is False):
-                y_hat = y_hat + noise
-
-            return y_hat
-
-        # Variable lengths within a batch -> per-sample modal/noise, then transient once
-        ys = []
-        noises = [] if self.noise_synth is not None else None
-
-        for i in range(B):
-            Li = int(lengths[i].item())
-
-            yi = self.modal_synth(modal_params[i : i + 1], Li)
-            yi = _pad_to_Tmax(yi, T_max)
-            ys.append(yi)
-
-            if self.noise_synth is not None:
-                assert noise_params is not None, "Noise params must be provided"
-                ni = self.noise_synth(noise_params[i : i + 1], Li)
-                ni = rearrange(ni, "b n -> b () n")
-                ni = _pad_to_Tmax(ni, T_max)
-                noises.append(ni)
-
-        y_hat = torch.cat(ys, dim=0)
-
+        num_samples = original.shape[-1]
+        y_hat = self.modal_synth(modal_params, num_samples)
         noise = None
         if self.noise_synth is not None:
-            noise = torch.cat(noises, dim=0)
+            noise = self.noise_synth(noise_params, num_samples)[:, None]
             if self.transient_takes_noise:
                 y_hat = y_hat + noise
-
         if self.transient_synth is not None:
             transient = self.transient_synth(y_hat, transient_params)
-            y_hat = (y_hat + transient) if self.transient_parallel else transient
-
-        if self.noise_synth is not None and (self.transient_takes_noise is False):
+            y_hat = y_hat + transient if self.transient_parallel else transient
+        if noise is not None and not self.transient_takes_noise:
             y_hat = y_hat + noise
-
         return y_hat
 
     @staticmethod
@@ -315,15 +220,20 @@ class DrumBlender(pl.LightningModule):
         return mask[:, None, :]
 
     def _do_step(self, batch):
+        frame_lengths = None
         if len(batch) == 2:
             original, params = batch
             lengths = None
         elif len(batch) == 3:
             original, params, lengths = batch
+        elif len(batch) == 4:
+            original, params, lengths, frame_lengths = batch
         else:
-            raise ValueError("Expected batch to be a tuple of length 2 or 3")
+            raise ValueError("Expected batch to contain 2, 3, or 4 entries")
 
-        y_hat = self(original, params, lengths=lengths)
+        lengths = validate_lengths(lengths, batch_size=original.shape[0],
+                                   max_length=original.shape[-1], device=original.device)
+        y_hat = self(original, params, lengths=lengths, frame_lengths=frame_lengths)
 
         original_masked = original
         y_hat_masked = y_hat
@@ -337,8 +247,13 @@ class DrumBlender(pl.LightningModule):
             # Let length-aware losses apply masking internally to avoid duplicating
             # padded-tail masking work before expensive spectral losses.
             loss = self.loss_fn(y_hat, original, lengths=lengths)
+        elif lengths is not None:
+            loss = torch.stack([
+                self.loss_fn(y_hat[i:i + 1, :, :length], original[i:i + 1, :, :length])
+                for i, length in enumerate(lengths.tolist())
+            ]).mean()
         else:
-            loss = self.loss_fn(y_hat_masked, original_masked)
+            loss = self.loss_fn(y_hat, original)
         # ### HIGHLIGHT: Return the masked target for length-safe metric computation.
         return loss, y_hat_masked, original_masked
 
@@ -355,7 +270,7 @@ class DrumBlender(pl.LightningModule):
         )
         # ### HIGHLIGHT: Keep the epoch-aggregated loss for long-term trend monitoring.
         self.log(
-            "train/loss_epoch",
+            "train/loss",
             loss,
             on_step=False,
             on_epoch=True,
@@ -390,7 +305,7 @@ class DrumBlender(pl.LightningModule):
         # ### HIGHLIGHT: Use one canonical validation epoch metric for logging,
         # LR scheduling, early stopping, and checkpoint selection.
         self.log(
-            "validation/loss_epoch",
+            "validation/loss",
             loss,
             on_step=False,
             on_epoch=True,
@@ -434,7 +349,7 @@ class DrumBlender(pl.LightningModule):
         loss, y_hat, target = self._do_step(batch)
         self.log("test/loss", loss, batch_size=target.shape[0])
         if hasattr(self, "metrics"):
-            lengths = batch[2] if len(batch) == 3 else [target.shape[-1]] * target.shape[0]
+            lengths = batch[2] if len(batch) >= 3 else [target.shape[-1]] * target.shape[0]
             scores = []
             for i, length in enumerate(lengths):
                 n = int(length)

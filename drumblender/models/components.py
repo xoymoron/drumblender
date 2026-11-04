@@ -1,8 +1,7 @@
 """Contains components for building drumblender models.
 """
 import torch
-from einops import rearrange
-from einops import repeat
+from einops import rearrange, repeat
 from torch import nn
 
 
@@ -53,7 +52,15 @@ class FiLM(nn.Module):
         film = self.net(film_embedding)
         gamma, beta = film.chunk(2, dim=-1)
         if self.use_batch_norm:
-            x = self.norm(x)
+            if self.norm.training and x.numel() // x.shape[1] == 1:
+                # A one-sample clip has no batch variance. Use running statistics
+                # without inventing audio observations or updating those statistics.
+                x = nn.functional.batch_norm(
+                    x, self.norm.running_mean.clone(), self.norm.running_var.clone(),
+                    training=False, eps=self.norm.eps,
+                )
+            else:
+                x = self.norm(x)
         return gamma[..., None] * x + beta[..., None]
 
 

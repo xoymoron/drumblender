@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 from pathlib import Path
 from time import monotonic, perf_counter
 from typing import Dict, List, Tuple
@@ -11,7 +10,6 @@ from typing import Dict, List, Tuple
 import torch
 import torchaudio
 from tqdm import tqdm
-import math
 
 from scripts.modal_extraction_stats import (
     result_details,
@@ -22,7 +20,7 @@ from scripts.modal_extraction_stats import (
 
 def stable_id(rel_path: str) -> str:
     # deterministic numeric-ish id from path
-    h = hashlib.md5(rel_path.encode("utf-8")).hexdigest()
+    h = hashlib.md5(rel_path.replace("\\", "/").encode("utf-8")).hexdigest()
     return str(int(h[:12], 16))
 
 
@@ -183,7 +181,7 @@ def parse_args(argv=None, default_backend="legacy"):
     )
 
     # behavior
-    ap.add_argument("--seed", type=int, default=5152845)
+    ap.add_argument("--seed", type=int, default=20261106)
     ap.add_argument("--max_files", type=int, default=0, help="0 = all files")
     ap.add_argument("--num_shards", type=int, default=1)
     ap.add_argument("--shard_index", type=int, default=0)
@@ -222,19 +220,19 @@ def parse_args(argv=None, default_backend="legacy"):
     )
 
     # failure handling
-    # Auto-padding retry is enabled by default to handle short files
-    # that fail inside nnAudio CQT reflect padding.
+    # Preserve short waveforms' frame clocks by changing only the CQT boundary
+    # extension when nnAudio cannot reflect-pad them.
     ap.add_argument(
         "--pad_short",
         dest="pad_short",
         action="store_true",
-        help="Enable auto right-padding retry for CQT reflect-pad failures (default: enabled).",
+        help="Retry short CQT reflect-pad failures with constant boundary padding (default: enabled).",
     )
     ap.add_argument(
         "--no_pad_short",
         dest="pad_short",
         action="store_false",
-        help="Disable auto right-padding retry for CQT reflect-pad failures.",
+        help="Disable the constant-boundary retry for CQT reflect-pad failures.",
     )
     ap.set_defaults(pad_short=True)
     ap.add_argument(
@@ -251,6 +249,11 @@ def parse_args(argv=None, default_backend="legacy"):
     )
     args = ap.parse_args(argv)
     is_new = args.modal_backend not in ("original", "legacy")
+    args.short_cqt_boundary_policy = (
+        "not_applicable"
+        if is_new
+        else "constant_on_reflect_failure" if args.pad_short else "disabled"
+    )
     if args.num_modes is None:
         args.num_modes = 128 if is_new else 64
     if args.min_length is None:
@@ -295,6 +298,21 @@ def main(default_backend="legacy"):
         raise FileNotFoundError(processed_root)
 
     out_dir = Path(args.out_dir)
+    if args.modal_backend not in ("original", "legacy"):
+        from drumblender.utils.modal_analysis_new import ANALYZER_VERSION
+
+        args.analyzer_version = ANALYZER_VERSION
+    else:
+        args.analyzer_version = args.modal_backend
+    if not args.resume and (
+        (out_dir / args.meta_name).exists()
+        or (out_dir / "modal_config.json").exists()
+        or any((out_dir / "features").glob("*.pt"))
+        or any((out_dir / "audio").glob("*.wav"))
+    ):
+        raise FileExistsError(
+            "Output is not empty; use --resume or a new output directory."
+        )
     config_path = out_dir / "modal_config.json"
     meta_path = out_dir / args.meta_name
     if args.resume and config_path.exists():
@@ -465,7 +483,7 @@ def main(default_backend="legacy"):
 
     def num_frames_from_len(T: int, hop: int) -> int:
         # Legacy fallback for analyzers that cannot return an empty mode tensor.
-        return max(1, math.ceil(T / hop))
+        return T // hop + 1
 
     def extract_feat(w: torch.Tensor):
         """
@@ -480,13 +498,10 @@ def main(default_backend="legacy"):
                 # for diagnostics; __call__ returns only the three parameters.
                 result = modal.analyze(w[0].numpy())
                 modal_freqs, modal_amps, modal_phases = (
-                    torch.from_numpy(values)[None]
-                    for values in result.parameters()
+                    torch.from_numpy(values)[None] for values in result.parameters()
                 )
             else:
-                modal_freqs, modal_amps, modal_phases = modal(
-                    w.to(args.compute_device)
-                )
+                modal_freqs, modal_amps, modal_phases = modal(w.to(args.compute_device))
         except RuntimeError as e:
             msg = str(e)
             # Older analyzers stack an empty list when no mode survives.
@@ -497,7 +512,8 @@ def main(default_backend="legacy"):
             raise
 
         analysis_seconds = (
-            result.analysis_seconds if result is not None
+            result.analysis_seconds
+            if result is not None
             else perf_counter() - analysis_started
         )
 
@@ -510,17 +526,6 @@ def main(default_backend="legacy"):
         feat = torch.stack([modal_freqs, modal_amps, modal_phases])  # (3,1,M,F)
         feat = feat.squeeze(1)  # (3,M,F)
         return feat, result, analysis_seconds
-
-    def infer_required_length_from_padding_error(msg: str, current_len: int) -> int:
-        # Parse nnAudio/torch padding errors and choose a safe retry length.
-        m = re.search(r"padding\s+\((\d+),\s*(\d+)\)", msg)
-        if m:
-            pad_l = int(m.group(1))
-            pad_r = int(m.group(2))
-            return max(current_len, pad_l + 1, pad_r + 1)
-
-        # Fallback if the exact tuple is missing from the error string.
-        return max(current_len + 1, current_len * 2)
 
     pbar = tqdm(
         zip(wavs, typed),
@@ -576,26 +581,31 @@ def main(default_backend="legacy"):
             if args.pad_to and args.pad_to > 0:
                 wav = right_pad_to(wav, args.pad_to)
 
-            # extract with retry for reflect padding errors from CQT
+            # A boundary extension must not lengthen the analyzed waveform:
+            # ModalSynth maps the complete feature grid onto the saved audio.
             analysis_num_samples = int(wav.shape[-1])
             try:
                 feat, result, analysis_seconds = extract_feat(wav)
             except RuntimeError as e:
                 msg = str(e)
-                if (not args.pad_short) or (
-                    "Padding size should be less than the corresponding input dimension"
-                    not in msg
+                if (
+                    is_new
+                    or (not args.pad_short)
+                    or (
+                        "Padding size should be less than the corresponding input dimension"
+                        not in msg
+                    )
                 ):
                     raise
 
-                # Apply one right-padding pass and retry once; if it still fails,
-                # propagate the error and mark this file as failed.
-                target = infer_required_length_from_padding_error(
-                    msg, int(wav.shape[-1])
-                )
-                wav_try = right_pad_to(wav, target)
-                analysis_num_samples = int(wav_try.shape[-1])
-                feat, result, analysis_seconds = extract_feat(wav_try)
+                # Keep the original frame count and sample clock. Restore the
+                # normal reflect boundary for subsequent, longer waveforms.
+                previous_pad_mode = modal.cqt.pad_mode
+                try:
+                    modal.cqt.pad_mode = "constant"
+                    feat, result, analysis_seconds = extract_feat(wav)
+                finally:
+                    modal.cqt.pad_mode = previous_pad_mode
 
             # force fixed num_modes
             p, m, f = feat.shape
@@ -622,6 +632,7 @@ def main(default_backend="legacy"):
                 "analysis_num_samples": analysis_num_samples,
                 "orig_relpath": str(rel),
                 "modal_backend": args.modal_backend,
+                "analyzer_version": args.analyzer_version,
                 "modal_slots": args.num_modes,
                 "active_modes": active_modes,
             }

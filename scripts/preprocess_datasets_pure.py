@@ -262,6 +262,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     config = parse_args(argv)
 
     from tqdm import tqdm
+
     from drumblender.utils.audio import preprocess_audio_file
     from drumblender.utils.device import resolve_device
 

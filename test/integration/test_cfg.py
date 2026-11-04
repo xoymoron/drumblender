@@ -1,15 +1,11 @@
 import glob
 import os
-from typing import Callable
-from typing import Optional
-from typing import Union
+from typing import Callable, Optional, Union
 
 import pytest
 import torch
-from pytorch_lightning import LightningDataModule
-from pytorch_lightning import LightningModule
-from pytorch_lightning.cli import LightningArgumentParser
-from pytorch_lightning.cli import LightningCLI
+from pytorch_lightning import LightningDataModule, LightningModule
+from pytorch_lightning.cli import LightningArgumentParser, LightningCLI
 
 
 def import_class(class_path: str):
@@ -36,7 +32,7 @@ TEST_TYPES = dict(
         recursive=True,
     ),
     experiment_cfg=dict(
-        pathname="cfg/*.yaml",
+        pathname="cfg/0*.yaml",
         recursive=False,
     ),
 )

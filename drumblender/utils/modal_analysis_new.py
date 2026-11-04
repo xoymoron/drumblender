@@ -13,6 +13,19 @@ from typing import Optional
 import numpy as np
 from scipy import fft, signal
 
+ANALYZER_VERSION = "hybrid-observed-window-v2"
+
+
+def _window_gain(window, centers, sample_count):
+    """Correct only the missing window mass outside the recorded signal."""
+    prefix = np.r_[0.0, np.cumsum(window, dtype=np.float64)]
+    left = np.asarray(centers, dtype=np.int64) - len(window) // 2
+    begin = np.clip(-left, 0, len(window))
+    end = np.clip(sample_count - left, 0, len(window))
+    mass = prefix[end] - prefix[begin]
+    return prefix[-1] / np.maximum(mass, np.finfo(np.float64).tiny)
+
+
 # Peak columns. Phase is the cosine phase at the analysis frame center.
 FREQUENCY, AMPLITUDE, PHASE, BANDWIDTH, CONFIDENCE, SOURCE = range(6)
 SOURCE_NAMES = ("cqt", "long_stft", "short_stft", "long_stft_short_envelope")
@@ -343,7 +356,13 @@ class CQTModalAnalysis:
                 start = width // 2
                 # Interpolate the demodulated coefficient, not its rotating carrier.
                 first = convolved[start + np.clip(left, 0, len(reduced) - 1)]
+                first *= _window_gain(
+                    window, np.clip(left, 0, len(reduced) - 1), len(reduced)
+                )
                 second = convolved[start + np.clip(left + 1, 0, len(reduced) - 1)]
+                second *= _window_gain(
+                    window, np.clip(left + 1, 0, len(reduced) - 1), len(reduced)
+                )
                 rotation = np.exp(2j * np.pi * frequency / rate)
                 coefficients[:, index] = (
                     (1 - fraction) * first + fraction * second / rotation
@@ -373,6 +392,7 @@ class CQTModalAnalysis:
                     locations = np.rint(centers[start:stop]).astype(int)
                     spectra = fft.rfft(view[locations] * window, axis=1, workers=1)
                     spectra *= (2 / window.sum()) * rotation
+                    spectra *= _window_gain(window, locations, len(audio))[:, None]
                     yield start, locations, spectra
 
             blocks = cpu_blocks()

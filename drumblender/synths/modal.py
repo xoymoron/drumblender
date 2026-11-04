@@ -94,10 +94,12 @@ def modal_synth(
         a = torch.nn.functional.interpolate(
             amps[:, start:stop], size=num_samples, mode="linear", align_corners=False
         )
-        phase_env = torch.cumsum(w, dim=-1)
+        phase_env = torch.cumsum(w, dim=-1, dtype=torch.float64)
         if phase is not None:
             phase_env = phase_env + phase[:, start:stop, :1]
-        y = y + torch.sum(a * torch.sin(phase_env), dim=1)
+        # Reduce before casting so high-frequency tails retain phase precision.
+        carrier = torch.sin(torch.remainder(phase_env, 2 * torch.pi)).to(w.dtype)
+        y = y + torch.sum(a * carrier, dim=1)
     return y
 
 

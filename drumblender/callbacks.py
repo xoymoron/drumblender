@@ -305,8 +305,10 @@ class LogAudioCallback(Callback):
         if len(self.saved_targets[split]) == 0 or len(self.saved_reconstructions[split]) == 0:
             return
 
-        targets = torch.cat(self.saved_targets[split], dim=0)
-        reconstructions = torch.cat(self.saved_reconstructions[split], dim=0)
+        # Different captured batches can have different padded time extents.
+        # Flatten only their batch axes, then concatenate audio along time.
+        targets = [item for batch in self.saved_targets[split] for item in batch]
+        reconstructions = [item for batch in self.saved_reconstructions[split] for item in batch]
 
         if self.max_audio_samples is not None:
             targets = targets[: self.max_audio_samples]
@@ -344,7 +346,7 @@ class RunNameModelCheckpoint(ModelCheckpoint):
             default_root_dir = default_root_dir.strip()
             if default_root_dir:
                 default_root = Path(default_root_dir).expanduser()
-                # `run.sh` pins Lightning logs under `<logs>/<run_name>/lightning`.
+                # Explicit run folders can use `<logs>/<run_name>/lightning`.
                 # Prefer that explicit run folder so checkpoint storage matches it.
                 if default_root.name == "lightning" and default_root.parent.name:
                     return default_root.parent.name

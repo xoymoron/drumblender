@@ -29,30 +29,12 @@ import yaml
 from tqdm import tqdm
 
 from drumblender.data.audio import AudioWithParametersDataset
-from drumblender.metrics import audio_pair_fingerprint, load_evaluation_metrics, score_reconstruction
+from drumblender.metrics import (
+    audio_pair_fingerprint,
+    load_evaluation_metrics,
+    score_reconstruction,
+)
 from drumblender.utils.model import load_model
-
-
-NOISE_ENCODER_BACKBONE_CHOICES = [
-    "soundstream",
-    "dac",
-    "dac_lstm",
-    "dac_len",
-    "dac_lstm_len",
-    "dac_len_lstm_len",
-    "wavtokenizer",
-    "bscodec",
-    "apcodec",
-    "spectrostream",
-]
-TRANSIENT_ENCODER_BACKBONE_CHOICES = [
-    "soundstream",
-    "dac",
-    "wavtokenizer",
-    "bscodec",
-    "apcodec",
-    "spectrostream",
-]
 
 
 def _safe_relpath(path_str: str) -> Path:
@@ -104,33 +86,6 @@ def _copy_path(src: Path, dst: Path) -> None:
             shutil.copy2(p, out)
 
 
-def _resolve_encoder_cfg(
-    cfg_dir: Path,
-    kind: str,
-    backbone: str,
-    explicit_cfg: Optional[str],
-) -> Optional[str]:
-    """Resolve an override path; the default backbone keeps the model config."""
-    if explicit_cfg is not None and explicit_cfg.strip() != "":
-        p = Path(explicit_cfg)
-        if not p.is_absolute():
-            p = (cfg_dir / p).resolve()
-        if not p.is_file():
-            raise FileNotFoundError(f"{kind} encoder config not found: {p}")
-        return str(p)
-
-    if backbone == "soundstream":
-        return None
-
-    rel = Path("models") / "encoder" / f"{kind}_{backbone}_style.yaml"
-    p = (cfg_dir / rel).resolve()
-    if not p.is_file():
-        raise FileNotFoundError(
-            f"{kind} encoder backbone '{backbone}' requested but config is missing: {p}"
-        )
-    return str(p)
-
-
 def _resolve_optional_cfg(cfg_dir: Path, cfg_value: Optional[str]) -> Optional[str]:
     """Resolve an optional config path relative to the model YAML directory."""
     if cfg_value is None or cfg_value.strip() == "":
@@ -151,14 +106,7 @@ def _build_export_model_config(args: argparse.Namespace) -> tuple[Path, bool]:
     base_cfg_path = Path(args.config).resolve()
     cfg_dir = base_cfg_path.parent
 
-    if (
-        args.loss_cfg is None
-        and args.transient_synth_cfg is None
-        and args.noise_encoder_cfg is None
-        and args.transient_encoder_cfg is None
-        and args.noise_encoder_backbone == "soundstream"
-        and args.transient_encoder_backbone == "soundstream"
-    ):
+    if args.loss_cfg is None and args.transient_synth_cfg is None:
         return base_cfg_path, False
 
     with base_cfg_path.open("r", encoding="utf-8") as f:
@@ -174,26 +122,6 @@ def _build_export_model_config(args: argparse.Namespace) -> tuple[Path, bool]:
     transient_synth_cfg = _resolve_optional_cfg(cfg_dir, args.transient_synth_cfg)
     if transient_synth_cfg is not None:
         init_args["transient_synth"] = transient_synth_cfg
-
-    noise_encoder_cfg = _resolve_encoder_cfg(
-        cfg_dir=cfg_dir,
-        kind="noise",
-        backbone=args.noise_encoder_backbone,
-        explicit_cfg=args.noise_encoder_cfg,
-    )
-    if noise_encoder_cfg is not None:
-        init_args["noise_autoencoder"] = noise_encoder_cfg
-        init_args["noise_autoencoder_accepts_audio"] = True
-
-    transient_encoder_cfg = _resolve_encoder_cfg(
-        cfg_dir=cfg_dir,
-        kind="transient",
-        backbone=args.transient_encoder_backbone,
-        explicit_cfg=args.transient_encoder_cfg,
-    )
-    if transient_encoder_cfg is not None:
-        init_args["transient_autoencoder"] = transient_encoder_cfg
-        init_args["transient_autoencoder_accepts_audio"] = True
 
     tmp_name = (
         f".export_resolved_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
@@ -302,7 +230,7 @@ def _resolve_data_args(args: argparse.Namespace) -> Dict[str, Any]:
     seed = (
         args.seed
         if args.seed is not None
-        else dataset_kwargs.get("seed", init_args.get("seed", 42))
+        else dataset_kwargs.get("seed", init_args.get("seed", 20261106))
     )
     sample_pack_keys = (
         args.sample_pack_keys
@@ -359,32 +287,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional transient synth config override (e.g., masked residual TCN).",
     )
-    parser.add_argument(
-        "--noise-encoder-backbone",
-        type=str,
-        default="soundstream",
-        choices=NOISE_ENCODER_BACKBONE_CHOICES,
-        help="Noise encoder backbone override.",
-    )
-    parser.add_argument(
-        "--transient-encoder-backbone",
-        type=str,
-        default="soundstream",
-        choices=TRANSIENT_ENCODER_BACKBONE_CHOICES,
-        help="Transient encoder backbone override.",
-    )
-    parser.add_argument(
-        "--noise-encoder-cfg",
-        type=str,
-        default=None,
-        help="Explicit noise encoder config path override.",
-    )
-    parser.add_argument(
-        "--transient-encoder-cfg",
-        type=str,
-        default=None,
-        help="Explicit transient encoder config path override.",
-    )
     parser.add_argument("--data-dir", type=str, default=None, help="Modal feature dataset root")
     parser.add_argument("--audio-dir", type=str, default=None, help="Original wav root")
     parser.add_argument("--meta-file", type=str, default=None)
@@ -397,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parameter-key", type=str, default=None)
     parser.add_argument("--expected-num-modes", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--synthesis-seed", type=int, default=20020420,
+    parser.add_argument("--synthesis-seed", type=int, default=20261106,
                         help="Per-sample synthesis randomness, independent of split seed/order.")
     parser.add_argument("--sample-rate", type=int, default=None)
     parser.add_argument(
@@ -488,6 +390,9 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
 
     # Keep each artifact type in its own folder so the bundle can be rescored later.
     output_dir = Path(args.output_dir)
+    if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
+        # A reused directory can mix checkpoints, manifests, and stale WAVs.
+        raise FileExistsError(f"Export requires an empty output directory: {output_dir}")
     recon_root = output_dir / "recon"
     target_root = output_dir / "target"
     eval_root = output_dir / "evaluation"
@@ -583,7 +488,7 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
                 "target_path",
             ]
         )
-        loss_writer.writerow(["index", "meta_key", "source_filename", "length", "test/loss"])
+        loss_writer.writerow(["index", "meta_key", "source_filename", "length", "sample_pack_key", "test/loss"])
 
         # Use batch size one so each sample keeps its own valid length and random seed.
         for idx in tqdm(range(limit), desc="export"):
@@ -618,7 +523,7 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
                 # Metric rows retain the configuration hash used to validate cached scores.
                 metric_rows.append({
                     "index": idx, "meta_key": meta_key, "source_filename": str(src_rel),
-                    "length": length_i, "sample_pack_key": dataset.top_level_pack(meta),
+                    "length": length_i, "sample_pack_key": dataset.sample_pack_key(meta),
                     "test/loss": loss_value,
                     "metric_config_sha256": metric_config_sha256,
                     **score_reconstruction(metric_modules, y_hat, x,
@@ -653,7 +558,8 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
                     target_path_str,
                 ]
             )
-            loss_writer.writerow([idx, meta_key, str(src_rel), length_i, loss_value])
+            loss_writer.writerow([idx, meta_key, str(src_rel), length_i,
+                                  dataset.sample_pack_key(meta), loss_value])
 
     summary = {
         "export_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -672,7 +578,7 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
         "split_train_ratio": data_args["split_train_ratio"],
         "split_val_ratio": data_args["split_val_ratio"],
         # Record the policy so results can be compared only with matching split membership.
-        "split_policy": "explicit_manifest" if args.split_manifest else "within_top_level_pack_before_filter_v2",
+        "split_policy": "explicit_ids" if args.split_manifest else "within_sample_pack_before_filter_v3",
         # Hash both source metadata and selected IDs so test membership is auditable.
         "metadata_sha256": hashlib.sha256((Path(data_args["data_dir"]) / data_args["meta_file"]).read_bytes()).hexdigest(),
         "selected_ids_sha256": hashlib.sha256(json.dumps(dataset.file_list[:limit]).encode()).hexdigest(),
@@ -725,7 +631,7 @@ def _run_export(args: argparse.Namespace, model_cfg_to_load: Path, is_temp_cfg: 
         # The compiler adds pack-level statistics and visual reports to this bundle.
         from compile_results import main as compile_results
 
-        compile_results([str(output_dir)])
+        compile_results([str(output_dir), "--device", device])
 
     if args.make_tar:
         tar_path = output_dir.with_suffix(".tar.gz")

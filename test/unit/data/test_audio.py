@@ -1,6 +1,8 @@
 """
 Tests for the `drumblender.data.audio` module.
 """
+
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -87,7 +89,7 @@ def test_audio_dataset_init_reproducible(fs, mocker):
 
 def test_audio_dataset_len(fs, mocker):
     dataset = audio_dataset(fs, mocker)
-    len(dataset) == 100
+    assert len(dataset) == 100
 
 
 def test_audio_dataset_getitem(fs, mocker):
@@ -128,22 +130,22 @@ def test_audio_dataset_sample_pack_split(fs, mocker, sample_pack_split_metadata)
 
     dataset._sample_pack_split(split="train", test_size=0.1, val_size=0.1)
     assert len(dataset.file_list) == 80
-    assert max(dataset.file_list) == 79
+    assert Counter(
+        dataset.metadata[key]["sample_pack_key"] for key in dataset.file_list
+    ) == {"a": 64, "b": 8, "c": 8}
 
-    # Because of the random split, split can be either 80-89 or 90-99
+    # Each pack contributes files instead of being assigned wholesale to a split.
     dataset._sample_pack_split(split="test", test_size=0.1, val_size=0.1)
     assert len(dataset.file_list) == 10
-    if min(dataset.file_list) == 80:
-        assert max(dataset.file_list) == 89
-    else:
-        assert min(dataset.file_list) == 90 and max(dataset.file_list) == 99
+    assert Counter(
+        dataset.metadata[key]["sample_pack_key"] for key in dataset.file_list
+    ) == {"a": 8, "b": 1, "c": 1}
 
     dataset._sample_pack_split(split="val", test_size=0.1, val_size=0.1)
     assert len(dataset.file_list) == 10
-    if min(dataset.file_list) == 80:
-        assert max(dataset.file_list) == 89
-    else:
-        assert min(dataset.file_list) == 90 and max(dataset.file_list) == 99
+    assert Counter(
+        dataset.metadata[key]["sample_pack_key"] for key in dataset.file_list
+    ) == {"a": 8, "b": 1, "c": 1}
 
 
 def test_audio_dataset_sample_pack_split_reproducible(

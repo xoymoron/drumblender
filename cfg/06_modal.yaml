@@ -27,31 +27,22 @@ lr_scheduler:
   init_args:
     monitor: validation/loss
     factor: 0.5
-    patience: 5
+    patience: 10
     min_lr: 0.00000625
 data: data/custom_all.yaml
 trainer:
+  replace_sampler_ddp: false
   devices: 1
   accelerator: gpu
-  max_epochs: 70
-  # logger:
-  #   class_path: pytorch_lightning.loggers.WandbLogger
-  #   init_args:
-  #     name: modal
-  #     project: drumblender
-  #     save_dir: logs
-  #     log_model: true
-  #   dict_kwargs:
-  #     job_type: train
-  #     group: ablation
-  #     entity: jordieshier
+  max_epochs: 150
+  accumulate_grad_batches: 8
   callbacks:
     - class_path: pytorch_lightning.callbacks.early_stopping.EarlyStopping
       init_args:
         monitor: validation/loss
-        patience: 9
-        min_delta: 0.01
+        patience: 20
         check_finite: true
+        check_on_train_epoch_end: true
     - class_path: pytorch_lightning.callbacks.LearningRateMonitor
     - class_path: drumblender.callbacks.LogAudioCallback
       init_args:
@@ -60,8 +51,4 @@ trainer:
         on_test: true
         save_audio_sr: 48000
         n_batches: 1
-    # - class_path: drumblender.callbacks.CleanWandbCacheCallback
-    #   init_args:
-    #     every_n_epochs: 2
-    #     max_size_in_gb: 2
-seed_everything: 396818285
+seed_everything: 20261106

@@ -1,6 +1,7 @@
 class_path: drumblender.data.ModalDataModule
 init_args:
-  batch_size: 12
+  batch_size: 8
+  seed: 20261106
   num_workers: 8
   dataset_class: drumblender.data.AudioWithParametersDataset
   data_dir: ../dataset/modal_features/processed_modal_flat
@@ -19,10 +20,10 @@ init_args:
   diff_threshold: 5.0
   save_modal_audio: false
   dataset_kwargs:
-    seed: 20020420
+    seed: 20261106
     parameter_key: feature_file
     audio_dir: ../dataset/processed
     split_strategy: sample_pack
     expected_num_modes: 64
     sample_pack_keys:
-      - splice
+      - Splice

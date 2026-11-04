@@ -33,18 +33,8 @@ init_args:
         output: loss
         reduction: mean
         device: null
-    mr_log_mel:
-      class_path: drumblender.metrics.MultiResolutionLogMelDistance
-      init_args:
-        sample_rate: 48000
-        fft_sizes: [512, 2048, 8192]
-        hop_sizes: [128, 512, 2048]
-        n_mels: [40, 80, 128]
-        f_min: 20.0
-        f_max: 20000.0
-        eps: 1.0e-05
-    band_spectral:
-      class_path: drumblender.metrics.BandSpectralErrors
+    band_lsd:
+      class_path: drumblender.metrics.BandLogSpectralDistance
       init_args:
         sample_rate: 48000
         n_fft: 4096
@@ -71,10 +61,3 @@ init_args:
         f_min: 20.0
         f_max: 20000.0
         include_c0: false
-    paired_timbre:
-      class_path: drumblender.metrics.PairedTimbreDistance
-      init_args:
-        sample_rate: 48000
-        model_name: laion/clap-htsat-unfused
-        revision: 8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a
-        stages: [0, 1, 2]

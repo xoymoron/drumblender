@@ -41,8 +41,8 @@ class ModalControlDataModule(pl.LightningDataModule):
     """Use existing split rules; never truncate modes or rescale padded frames."""
 
     def __init__(self, feature_root: str, processed_root: str,
-                 sample_rate: int = 48000, batch_size: int = 2,
-                 num_workers: int = 4, seed: int = 20020420):
+                 sample_rate: int = 48000, batch_size: int = 8,
+                 num_workers: int = 4, seed: int = 20261106):
         super().__init__()
         self.feature_root, self.processed_root = feature_root, processed_root
         self.sample_rate, self.batch_size = sample_rate, batch_size

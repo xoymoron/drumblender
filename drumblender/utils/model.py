@@ -3,8 +3,7 @@ Helpful utils for handling pre-trained models
 """
 
 import inspect
-from typing import Any
-from typing import Union
+from typing import Any, Union
 
 from jsonargparse import ArgumentParser
 

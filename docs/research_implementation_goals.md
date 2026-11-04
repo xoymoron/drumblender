@@ -21,12 +21,12 @@ Cymbal의 복잡성과 dense high-frequency 구조는 인정하며, 완벽한 cy
 |---|---|---|
 | 입력 | Modal trajectories와 원본 audio/detail 정보 | Modal trajectories와 원본 audio/detail representation |
 | Network의 책임 | 공통 context를 사용해 modal과 noise/texture synthesis parameter를 함께 예측 | 구분 가능한 modal/detail 입력을 함께 사용해 전체 audio를 복원 |
-| 최종 합성 | Oscillator/modal DSP와 noise/texture DSP의 출력 합산 | 하나의 neural decoder가 최종 waveform 생성; 구현에 따라 complex spectrum과 inverse transform을 사용할 수 있음 |
+| 최종 합성 | Oscillator/modal DSP와 noise/texture DSP의 출력 합산 | 하나의 neural decoder가 최종 waveform 생성 |
 | Modal 정보의 지위 | 실제 DSP 합성 parameter와 연결됨 | 편집 가능한 conditioning이며 oscillator 출력을 최종 audio에 반드시 더하지 않음 |
 | 용어 | DDSP/SMS 계열의 structured synthesis | Modal-conditioned neural synthesis; SMS-informed / SMS-inspired라고 설명 가능 |
 | 주된 검증 질문 | Joint parameter prediction이 별도 예측보다 reconstruction과 control에 이득을 주는가? | 높은 reconstruction을 유지하면서 modal conditioning이 실제로 유효한 control을 만드는가? |
 
-이 표는 architecture 수준의 구분이다. 하나의 Python class로 묶였는지, 두 모델을 동시에 학습하는지, decoder head가 몇 개인지만으로 A/B를 분류하지 않는다. B를 단지 network가 differentiable하거나 iSTFT를 쓴다는 이유로 A와 같은 DDSP/SMS synthesis라고 부르지 않는다.
+이 표는 architecture 수준의 구분이다. 하나의 Python class로 묶였는지, 두 모델을 동시에 학습하는지, decoder head가 몇 개인지만으로 A/B를 분류하지 않는다. B를 단지 network가 differentiable하다는 이유로 A와 같은 DDSP/SMS synthesis라고 부르지 않는다.
 
 ## 3. 목표 A: Joint DSP synthesis
 
@@ -72,15 +72,12 @@ source x -----------------> audio/detail representation z+
 | 기존 `DrumBlender`와 `cfg/05_all_parallel.yaml` | 추출 modal, noise, transient의 structured synthesis 경로 | 기존 reconstruction reference로 보존 |
 | `ModalControlTask`, typed modal encoder, temporal SAE, modal-conditioned noise, 전용 CLI | 코드가 있으며 training 문서는 runtime/DDP/학습 품질을 미검증으로 기록 | A의 재사용 기반. B의 전체 waveform decoder 구현은 아님 |
 | 기존 CLI의 `modal -> noise -> joint -> patterns` | 기존 두-branch 모델의 staged training | `joint`는 학습 stage 이름이다. 목표 A의 통합 parameter prediction 구현 완료를 뜻하지 않음 |
-| 2026-09-25 complex-excitation texture spec/plan | Frozen modal + `iSTFT(A * U)` texture의 두 audible branches 제안 | 이전 연구 후보로 보존. A/B의 필수 architecture나 B 구현으로 간주하지 않음 |
 | 목표 A | 두 방향 중 하나로 채택 | 세부 설계·전용 구현·비교 검증이 남음 |
 | 목표 B | 두 방향 중 하나로 채택 | 세부 설계·전용 구현·비교 검증이 남음 |
 
 관련 문서:
 
 - [기존 modal 분석·control 구현과 training / audition](modal.md)
-- [과거 complex-excitation texture 제안](superpowers/specs/2026-09-25-transient-aware-noise-control-design.md)
-- [과거 texture implementation plan](superpowers/plans/2026-09-25-transient-aware-noise-control.md)
 
 기존 문서의 두 audible branches, frozen modal, SAE, 특정 width/loss와 CLI는 해당 구현/제안에 적용한다. 새 목표 B에 자동으로 상속하거나 이번 결정으로 이미 승인된 세부 설계처럼 취급하지 않는다.
 

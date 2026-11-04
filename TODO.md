@@ -1,7 +1,6 @@
 # Development TODO
 
-This file tracks repo/development items that came up during the DrumBlender
-encoder work. 
+This file tracks DrumBlender research and development items.
 
 ## Adopted implementation goals (2026-10-29)
 
@@ -16,7 +15,7 @@ B만 채택하거나 A를 단순 참고 대상으로만 남기기로 결정한 �
 - [ ] Neutral reconstruction과 creative control을 분리 평가하고 held-out audition 및 실패 예시를 기록한다.
 
 기존 `modal -> noise -> joint -> patterns`의 `joint`는 training stage다. 새 목표 A의 구현 완료를 뜻하지 않는다.
-아래 encoder 설정과 분석기 조사 메모는 기존 경로/후보에 대한 기록이며 새 A/B 전체의 필수 architecture로 간주하지 않는다.
+아래 분석기 조사 메모는 기존 경로/후보에 대한 기록이며 새 A/B 전체의 필수 architecture로 간주하지 않는다.
 
 ## Reference
 
@@ -31,144 +30,12 @@ B만 채택하거나 A를 단순 참고 대상으로만 남기기로 결정한 �
   - Modal feature extraction environments therefore need `scipy` in addition
     to the existing `torch` / `torchaudio` / `nnAudio` stack.
 
-- Existing noise encoder modes:
-  - `baseline`: SoundStream noise encoder.
-  - `dac`: DAC-style noise encoder.
-  - `dac_lstm`: DAC-style noise encoder with a 2-layer unidirectional LSTM tail.
-  - `dac_len`: DAC-style noise encoder with padding-aware DAC backbone.
-  - `dac_lstm_len`: plain DAC backbone plus length-aware LSTM tail.
-  - `dac_len_lstm_len`: padding-aware DAC backbone plus length-aware LSTM tail.
-  - `wavtokenizer`: WavTokenizer-style compact encoder.
-  - `bscodec`: BSCodec-style compact encoder.
-  - `apcodec`: APCodec-style compact encoder.
-  - `spectrostream`: SpectroStream-style encoder.
-
-- Existing transient encoder modes:
-  - `baseline`: SoundStream attention encoder.
-  - `dac`: DAC-style attention encoder.
-  - `wavtokenizer`: WavTokenizer-style compact attention encoder.
-  - `bscodec`: BSCodec-style compact attention encoder.
-  - `apcodec`: APCodec-style compact attention encoder.
-  - `spectrostream`: SpectroStream-style attention encoder.
-
-- Completed development context:
-  - DisCodec code/config/script references were removed.
-  - Plain DAC encoder behavior was checked against the old DisCodec-era DAC
-    implementation; plain noise DAC and transient DAC matched exactly.
-  - `run.sh` supports the current encoder mode strings. Checkpoint evaluation
-    uses `scripts/export_recon_wavs.py` with optional encoder config overrides.
-
-## Codec-style encoder compact settings
-
-All codec-style encoder variants must preserve the DrumBlender audio contract:
-
-- Input audio stays 48 kHz mono waveform: `[B, 1, T]`.
-- Noise encoder output stays `[B, ceil(T / 128), 128]`.
-- Transient encoder output stays `[B, 128]`.
-- Frame hop stays 128 samples, i.e. 375 fps at 48 kHz.
-- Do not reduce the observed sample rate or output temporal resolution just to
-  make the models smaller.
-
-### WavTokenizer-style compact setting
-
-- Original method meaning:
-  - WavTokenizer is an efficient acoustic discrete codec/tokenizer for audio
-    language modeling.
-  - Official public configs are 24 kHz and target low token rates such as 40 or
-    75 tokens/sec, using an EnCodec/SEANet-style encoder, RVQ, and a Vocos-like
-    decoder.
-  - In DrumBlender we only use the pre-RVQ waveform encoder idea, not the
-    quantizer or decoder, and we keep the much denser 48 kHz / 128-sample-hop
-    frame output.
-- Full-style reference setting:
-  - `hidden_channels=32`, `latent_channels=512`, `lstm_layers=2`.
-  - Encoder pair params: about 14.31M.
-- Selected compact setting:
-  - `hidden_channels=32`, `latent_channels=512`, `lstm_layers=1`.
-  - Encoder pair params: about 10.11M.
-- What was reduced:
-  - Kept the official-small-style SEANet width and 512-dim latent width.
-  - Kept an LSTM tail, but reduced recurrent depth from 2 layers to 1.
-- Expected effect:
-  - Keeps the SEANet + recurrent-context flavor.
-  - Smaller than the full WavTokenizer-style encoder without changing what the
-    model observes.
-  - Less long-context capacity than full style, but still not an aggressive
-    low-capacity rewrite.
-
-### BSCodec-style compact setting
-
-- Original method meaning:
-  - BSCodec is a band-split neural audio codec.
-  - Its main idea is to split audio into frequency bands and encode each band
-    separately, so low/mid/high regions can receive separate modeling capacity.
-  - Official recipes include 2-band, 3-band, and 5-band variants at 24 kHz.
-- Full-style reference setting:
-  - 48 kHz mono, 3 bands covering `0-2k`, `2-8k`, `8-24k`.
-  - Per-band SEANet-style encoders with `hidden_channels=32`,
-    `latent_channels=128`, `lstm_layers=1`.
-  - Encoder pair params: about 21.64M.
-- Selected compact setting:
-  - 2 bands, `hidden_channels=32`, `latent_channels=128`, `lstm_layers=1`.
-  - Encoder pair params: about 14.45M.
-- What was reduced:
-  - Reduced band count from 3 to 2, following the official smaller BSCodec
-    recipe direction.
-  - Kept each per-band encoder width and latent width unchanged.
-  - Kept the LSTM tail.
-- Expected effect / caveat:
-  - Still covers the full 0-24 kHz range at 48 kHz.
-  - Still tests the BSCodec band-split hypothesis.
-  - Frequency partition resolution is lower than the 3-band version, so this is
-    a stronger tradeoff than WavTokenizer/APCodec compact settings. Compare carefully,
-    especially on samples where separating low body, mid attack, and high noise
-    matters.
-
-### APCodec-style compact setting
-
-- Original method meaning:
-  - APCodec is designed for 48 kHz audio and encodes amplitude and phase spectra
-    in parallel.
-  - Official code/config uses STFT features with `n_fft=1024`, `hop_size=40`,
-    `win_size=320`, ConvNeXt-style amplitude/phase branches, and RVQ.
-  - In DrumBlender we keep the amplitude/phase spectral encoder idea and remove
-    RVQ/decoder.
-- Full-style reference setting:
-  - `hidden_channels=256`, `branch_channels=256`, `num_layers=8`,
-    `latent_channels=32`.
-  - Encoder pair params: about 13.58M.
-- Selected compact setting:
-  - `hidden_channels=192`, `branch_channels=192`, `num_layers=6`,
-    `latent_channels=32`.
-  - Encoder pair params: about 7.20M.
-- What was reduced:
-  - Moderately reduced ConvNeXt branch width.
-  - Moderately reduced branch depth from 8 blocks to 6.
-  - Kept `latent_channels=32`.
-  - Keep STFT settings and output hop unchanged.
-- Expected effect:
-  - Preserves APCodec's core amplitude/phase split at 48 kHz.
-  - Reduces branch capacity without lowering spectral analysis resolution.
-  - This is the safest compact variant among the three because the original method
-    is already a 48 kHz spectral codec and the lite change mostly trims network
-    capacity rather than changing what the model observes.
-
-Reference links:
-
-- WavTokenizer paper/code: https://arxiv.org/abs/2408.16532,
-  https://github.com/jishengpeng/WavTokenizer
-- BSCodec code branch: https://github.com/whr-a/espnet/tree/bscodec
-- APCodec paper/code: https://arxiv.org/abs/2402.10533,
-  https://github.com/YangAi520/APCodec
-
-
 ## CQT 개선 관련 자료조사
 synchrosqueezed ridge analysis
 FRI 기반 grid-free ridge estimation
 EDSM/eaQHM model을 refiner로 사용
 
 최신 방법이 보는 난제는 grid dependence, ridge jitter, short fake ridge, curved IF estimation failure, high noise/signal density에서의 mode 간 간섭 등이 있다. 
-
 
 의미 있는 물리 mode가 아니라, 샘플 곳곳에 흩어진 지역적 에너지 maxima가 채택되는 점이 본질적 문제. FRI 논문도 제안법이 좋은 성능을 보였지만, spatial constraint를 쓰지 않으면 작은 oscillation이 남는다고 스스로 적고 있다. 이건 매우 중요한 힌트다. 즉, 개선의 핵심은 단순히 “더 좋은 transform” 하나로 끝나지 않고, 연속성/곡률/수명(duration)/에너지 통합량을 넣은 ridge selection objective가 반드시 같이 가야 한다는 뜻이다. 
 
@@ -198,14 +65,11 @@ eaQHM은 medium-to-large window에서 EDSM보다 낫고, 반대로 EDSM은 작�
 기본적으로 eaQHM은 parameter-refinement mechanism이라 초기 instantaneous component 추정에 의존 + small window에서는 LS conditioning 문제. 반대로 EDSM은 작은 window에서 잘 버티지만, window 안에서는 frequency stationarity를 가정. 
 따라서 곡선형 이동을 강하게 보이는 드럼 모달에는 detector로 쓰기엔 한계가 있음. 
 
-
-
 synchrosqueezed CWT with generalized Morse wavelets를 기본 time-frequency front-end로 둔 다음 그 위에서 전체 샘플 구간에 대해 ridge candidate를 만들고, Viterbi류 또는 연속 최적화 기반의 path objective로 64개 내외의 track를 선택. 
 objective는 최소한 적분 에너지, 최소 지속시간, slope/curvature penalty, crossing penalty, HF 가중 threshold 포함해야 한다. 
 여기에 dense/high-frequency region에서만 FRI-TLS 혹은 FRI-SST를 써서 ridge frequency를 grid에서 떼내기
 마지막으로 각 track마다 짧은 window EDSM으로 damping과 local sinusoid parameter를 정련하기. 
 smoother가 더 필요하면 probabilistic chirp smoother 같은 per-track refiner를 마지막 단계에 붙일 수 있음
-
 
 실제 우선순위를 하나로 정리하면 이렇다.
 최우선은 SSQ-CWT + continuity-regularized ridge tracking이다.

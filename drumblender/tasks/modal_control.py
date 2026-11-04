@@ -13,9 +13,9 @@ import pytorch_lightning as pl
 import torch
 from torch.nn import functional as F
 
+from drumblender.models.modal_conditioned_noise import ModalConditionedNoise
 from drumblender.models.modal_control import ModalEncoding, NeuralModalAutoencoder
 from drumblender.models.modal_patterns import TemporalModalSAE
-from drumblender.models.modal_conditioned_noise import ModalConditionedNoise
 from drumblender.synths.modal import ModalSynth
 from drumblender.synths.noise import NoiseGenerator
 
@@ -38,7 +38,7 @@ metrics. center=False avoids artificial boundary samples in these spectra.
     for n in sizes:
         window = torch.hann_window(n, device=target.device, dtype=torch.float32)
 
-        def spectrum(x):
+        def spectrum(x, n=n, window=window):
             return torch.stft(x.float().reshape(-1, length), n, hop_length=max(1, n // 4),
                               window=window, center=False, return_complex=True).abs()
 
@@ -83,12 +83,12 @@ class ModalControlTask(pl.LightningModule):
     def __init__(self, stage: str = "modal", sample_rate: int = 48000,
                  channels: int = 64, context_tokens: int = 8,
                  features: int = 256, top_k: int = 8,
-                 learning_rate: float = 1e-4, joint_modal_lr_scale: float = 0.1,
+                 learning_rate: float = 1e-4,
                  mask_probability: float = 0.15,
                  modal_audio_weight: float = 0.1,
                  anchor_weight: float = 1.0, residual_weight: float = 0.1):
         super().__init__()
-        if (sample_rate <= 0 or learning_rate <= 0 or not 0 < joint_modal_lr_scale <= 1
+        if (sample_rate <= 0 or learning_rate <= 0
                 or not 0 <= mask_probability < 1
                 or min(modal_audio_weight, anchor_weight, residual_weight) < 0):
             raise ValueError("Invalid training rates, loss weights or sample rate.")
@@ -129,14 +129,18 @@ class ModalControlTask(pl.LightningModule):
     def configure_optimizers(self):
         lr = self.hparams.learning_rate
         groups = []
-        for module, rate in (
-            (self.modal_autoencoder, lr * (self.hparams.joint_modal_lr_scale if self.stage == "joint" else 1)),
-            (self.noise_autoencoder, lr), (self.patterns, lr),
-        ):
+        for module in (self.modal_autoencoder, self.noise_autoencoder, self.patterns):
             parameters = [p for p in module.parameters() if p.requires_grad]
             if parameters:
-                groups.append({"params": parameters, "lr": rate})
-        return torch.optim.AdamW(groups, weight_decay=1e-6)
+                groups.append({"params": parameters, "lr": lr})
+        optimizer = torch.optim.Adam(groups, lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, factor=0.5, patience=10, min_lr=6.25e-6,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "monitor": "validation/loss"},
+        }
 
     def on_save_checkpoint(self, checkpoint):
         checkpoint["modal_control_stage"] = self.stage
@@ -187,7 +191,7 @@ class ModalControlTask(pl.LightningModule):
             residual = audio - modal.detach()
             features = self.noise_autoencoder.encode_reference(residual)
             bands = self._noise_bands(features, state.hidden.detach(), state.mask, length)
-            noise = self._render_noise(bands, length, seed=None if training else 0)
+            noise = self._render_noise(bands, length, seed=None if training else 20261106)
             mixture_loss = spectral_loss(modal + noise, audio)
             residual_loss = spectral_loss(noise, residual.detach())
             loss = loss + mixture_loss + self.hparams.residual_weight * residual_loss
@@ -246,7 +250,7 @@ class ModalControlTask(pl.LightningModule):
         return ModalReference(state, prediction, features, bands, audio.shape[-1])
 
     @torch.no_grad()
-    def edit_reference(self, reference, feature=0, amount=0.0, noise_link=0.0, seed=0):
+    def edit_reference(self, reference, feature=0, amount=0.0, noise_link=0.0, seed=20261106):
         if self.training:
             raise RuntimeError("Call eval() before editing.")
         if not 0 <= noise_link <= 1:

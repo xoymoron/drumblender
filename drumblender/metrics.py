@@ -1,15 +1,14 @@
 """Paired reconstruction errors for spectral, temporal, and timbral fidelity."""
-from typing import Any
 import hashlib
 import importlib
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import torch
 import torchaudio
 from torchmetrics import Metric
-
 
 DEFAULT_METRICS_CONFIG = Path(__file__).resolve().parents[1] / "cfg/metrics/drumblender_metrics.yaml"
 
@@ -33,8 +32,8 @@ def load_evaluation_metrics(config_path=None):
         return value
 
     metrics = instantiate(spec)
-    required = {"lsd", "flux_onset", "mr_stft", "mr_log_mel", "band_spectral",
-                "log_rms_envelope", "mfcc", "paired_timbre"}
+    required = {"lsd", "flux_onset", "mr_stft", "band_lsd",
+                "log_rms_envelope", "mfcc"}
     if not isinstance(metrics, torch.nn.ModuleDict) or not required.issubset(metrics):
         raise ValueError(f"Evaluation config must define {sorted(required)}")
     config_sha256 = hashlib.sha256(json.dumps(spec, sort_keys=True).encode("utf-8")).hexdigest()
@@ -73,9 +72,8 @@ def score_reconstruction(metrics, pred, target, sample_rate=None):
 
 def evaluation_score_keys(metrics):
     """Every scalar output expected from the configured evaluation suite."""
-    keys = [f"test/{name}" for name in metrics if name != "band_spectral"]
-    keys.extend(f"test/band_{kind}_{name}" for name, _, _ in metrics["band_spectral"].bands
-                for kind in ("lsd", "sc"))
+    keys = [f"test/{name}" for name in metrics if name != "band_lsd"]
+    keys.extend(f"test/band_lsd_{name}" for name, _, _ in metrics["band_lsd"].bands)
     return keys
 
 
@@ -204,154 +202,8 @@ class MFCCError(Metric):
         return self.mfcc / self.count
 
 
-class PairedTimbreDistance(torch.nn.Module):
-    """Cosine distance between CLAP channel means and population standard deviations.
-
-    Following the Huang-style representation studied by Tian et al. (2025),
-    concatenate channel statistics from every block in the selected stages.
-    This pins a specific Hugging Face backbone and preprocessing policy; it
-    is not a reproduction of every checkpoint/configuration in that paper.
-    https://arxiv.org/abs/2507.07764
-    """
-
-    def __init__(
-        self,
-        sample_rate: int = 48000,
-        model_name: str = "laion/clap-htsat-unfused",
-        revision: str | None = "8fa0f1c6d0433df6e97c127f64b2a1d6c0dcda8a",
-        stages=(0, 1, 2),
-    ):
-        super().__init__()
-        if not stages or len(set(stages)) != len(stages) or any(i < 0 for i in stages):
-            raise ValueError("CLAP stages must be distinct nonnegative indices")
-        self.sample_rate = sample_rate
-        self.model_name = model_name
-        self.revision = revision
-        self.stages = tuple(stages)
-        self.backbone = None
-        self.feature_extractor = None
-        # Remember .to(device) before lazy loading; cached reports need no model download.
-        self.register_buffer("_device_anchor", torch.empty(0), persistent=False)
-
-    def _load_backbone(self):
-        """Load the frozen audio branch once, without the CLAP text encoder."""
-        if self.backbone is not None:
-            return
-        try:
-            from transformers import ClapAudioModel, ClapFeatureExtractor
-        except ImportError as exc:
-            raise ImportError('Paired timbre evaluation needs: pip install -e ".[evaluation]"') from exc
-        extractor = ClapFeatureExtractor.from_pretrained(self.model_name, revision=self.revision)
-        # Full CLAP checkpoints prefix this branch with audio_model.; map it
-        # explicitly so a partial load can never silently score random weights.
-        backbone, loading = ClapAudioModel.from_pretrained(
-            self.model_name, revision=self.revision,
-            key_mapping={r"^audio_model\.": ""}, output_loading_info=True,
-        )
-        if loading["missing_keys"] or loading["mismatched_keys"] or loading["error_msgs"]:
-            raise RuntimeError("CLAP audio weights were not fully restored; check the checkpoint and revision")
-        if extractor.sampling_rate != self.sample_rate:
-            raise ValueError(f"CLAP expects {extractor.sampling_rate} Hz, configured {self.sample_rate}")
-        if backbone.config.enable_fusion or max(self.stages) >= len(backbone.audio_encoder.layers):
-            raise ValueError("Paired timbre requires an unfused CLAP model with the selected stages")
-        self.feature_extractor = extractor
-        self.backbone = backbone.to(self._device_anchor.device).eval().requires_grad_(False)
-
-    def _style_vectors(self, pair):
-        """Extract [mean, std] per channel over all spatial tokens of each block."""
-        statistics = []
-
-        def collect(module, inputs, output):
-            features = output[0].float()  # Swin block output: [pair, spatial tokens, channels].
-            statistics.append(torch.cat((features.mean(dim=1),
-                                         features.std(dim=1, unbiased=False)), dim=-1))
-
-        handles = [block.register_forward_hook(collect)
-                   for i in self.stages for block in self.backbone.audio_encoder.layers[i].blocks]
-        try:
-            # Fixed-window zero padding is part of this learned metric's definition.
-            # Never repeat hits or let the processor randomly crop longer inputs.
-            features = self.feature_extractor(
-                list(pair.detach().cpu().float().numpy()), sampling_rate=self.sample_rate,
-                padding="pad", truncation="rand_trunc", return_tensors="pt",
-            ).to(self._device_anchor.device)
-            self.backbone(**features)
-        finally:
-            for handle in handles:
-                handle.remove()
-        return torch.cat(statistics, dim=-1)
-
-    @torch.no_grad()
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        if pred.shape != target.shape or pred.ndim != 3 or pred.shape[:2] != (1, 1):
-            raise ValueError("Paired timbre expects matching [1, 1, samples] audio")
-        if pred.shape[-1] == 0 or not (torch.isfinite(pred).all() and torch.isfinite(target).all()):
-            raise ValueError("Paired timbre requires nonempty, finite audio")
-        self._load_backbone()
-        self.backbone.eval()  # Parent .train() calls must not enable CLAP dropout.
-        window = self.feature_extractor.nb_max_samples
-        total = pred.new_zeros((), device=self._device_anchor.device, dtype=torch.float32)
-        # Nonoverlapping, aligned windows cover the full clip, including a short tail.
-        # Weight by real sample count so the padded final window is not overrepresented.
-        for offset in range(0, pred.shape[-1], window):
-            pair = torch.cat((pred[0, :, offset:offset + window],
-                              target[0, :, offset:offset + window]), dim=0)
-            style = self._style_vectors(pair)
-            distance = (1 - torch.nn.functional.cosine_similarity(style[:1], style[1:])).clamp(0, 2)
-            total += distance.squeeze(0) * pair.shape[-1]
-        return total / pred.shape[-1]
-
-
-class MultiResolutionLogMelDistance(torch.nn.Module):
-    """Mean absolute natural-log mel magnitude distance across resolutions."""
-
-    def __init__(
-        self,
-        sample_rate: int = 48000,
-        fft_sizes=(512, 2048, 8192),
-        hop_sizes=(128, 512, 2048),
-        n_mels=(40, 80, 128),
-        f_min: float = 20.0,
-        f_max: float = 20000.0,
-        eps: float = 1e-5,
-    ):
-        super().__init__()
-        if not (len(fft_sizes) == len(hop_sizes) == len(n_mels)) or not fft_sizes:
-            raise ValueError("Log-mel resolutions must have matching nonempty lengths")
-        if not 0 <= f_min < f_max <= sample_rate / 2:
-            raise ValueError("Invalid mel frequency range")
-        self.sample_rate = sample_rate
-        self.fft_sizes = tuple(fft_sizes)
-        self.hop_sizes = tuple(hop_sizes)
-        self.eps = eps
-        for i, (n_fft, n_mel) in enumerate(zip(fft_sizes, n_mels)):
-            fb = torchaudio.functional.melscale_fbanks(
-                n_fft // 2 + 1, f_min, f_max, n_mel, sample_rate,
-                norm="slaney", mel_scale="slaney",
-            )
-            self.register_buffer(f"mel_filter_{i}", fb)
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        distances = []
-        for i, (n_fft, hop) in enumerate(zip(self.fft_sizes, self.hop_sizes)):
-            window = torch.hann_window(n_fft, device=pred.device, dtype=pred.dtype)
-            fb = getattr(self, f"mel_filter_{i}")
-            def log_mel(audio):
-                spectrum = torch.stft(
-                    audio[:, 0], n_fft=n_fft, hop_length=hop,
-                    window=window, return_complex=True, pad_mode="constant",
-                ).abs().transpose(1, 2)
-                return torch.log(torch.matmul(spectrum, fb).clamp_min(self.eps))
-            distances.append(torch.mean(torch.abs(log_mel(pred) - log_mel(target))))
-        return torch.stack(distances).mean()
-
-
-class BandSpectralErrors(torch.nn.Module):
-    """Per-band log-power LSD and magnitude SC, from one STFT.
-
-    SC divides by target-band energy. A band absent from the reference can
-    therefore produce a large, informative error; report tail quantiles.
-    """
+class BandLogSpectralDistance(torch.nn.Module):
+    """Per-band log-power LSD, sharing one STFT across frequency bands."""
 
     def __init__(
         self,
@@ -391,19 +243,16 @@ class BandSpectralErrors(torch.nn.Module):
             xa, ya = x[:, start:stop], y[:, start:stop]
             log_difference = torch.log(xa.square() + self.eps) - torch.log(ya.square() + self.eps)
             scores[f"band_lsd_{name}"] = log_difference.square().mean(dim=1).sqrt().mean()
-            scores[f"band_sc_{name}"] = torch.linalg.vector_norm(xa - ya, dim=(1, 2)).div(
-                torch.linalg.vector_norm(ya, dim=(1, 2)).clamp_min(self.eps)
-            ).mean()
         return scores
 
 
 class LogRMSEnvelopeError(torch.nn.Module):
-    """Mean absolute difference of framewise log RMS envelopes."""
+    """Framewise log-RMS MAE, including an unpadded final partial frame."""
 
     def __init__(self, frame_size: int = 1024, hop_size: int = 256, eps: float = 1e-5):
         super().__init__()
-        if frame_size <= 0 or hop_size <= 0 or eps <= 0:
-            raise ValueError("Frame, hop, and floor must be positive")
+        if frame_size <= 0 or not 0 < hop_size <= frame_size or eps <= 0:
+            raise ValueError("Require frame > 0, 0 < hop <= frame, and floor > 0")
         self.frame_size = frame_size
         self.hop_size = hop_size
         self.eps = eps
@@ -415,6 +264,11 @@ class LogRMSEnvelopeError(torch.nn.Module):
             power = torch.nn.functional.avg_pool1d(
                 audio.square(), kernel_size=self.frame_size, stride=self.hop_size
             )
+            covered = (power.shape[-1] - 1) * self.hop_size + self.frame_size
+            if covered < audio.shape[-1]:
+                # Continue the frame grid once, averaging only real tail samples.
+                tail = audio[..., power.shape[-1] * self.hop_size:]
+                power = torch.cat((power, tail.square().mean(dim=-1, keepdim=True)), dim=-1)
             return 0.5 * torch.log(power + self.eps ** 2)
         return torch.mean(torch.abs(envelope(pred) - envelope(target)))
 

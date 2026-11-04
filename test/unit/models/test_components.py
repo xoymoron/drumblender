@@ -1,8 +1,35 @@
 import torch
 
-from drumblender.models.components import FiLM
-from drumblender.models.components import GatedActivation
-from drumblender.models.components import TFiLM
+from drumblender.models.components import FiLM, GatedActivation, TFiLM
+
+
+def test_film_supports_single_valid_sample_in_training():
+    film = FiLM(4, 3).train()
+    x = torch.ones(1, 3, 1, requires_grad=True)
+    embedding = torch.ones(1, 4, requires_grad=True)
+    output = film(x, embedding)
+    assert output.shape == x.shape
+    assert torch.isfinite(output).all()
+    output.sum().backward()
+    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(embedding.grad).all()
+
+
+def test_singleton_film_gradient_uses_the_statistics_from_its_forward():
+    film = FiLM(3, 2).train()
+    with torch.no_grad():
+        film.net.weight.zero_()
+        film.net.bias.copy_(torch.tensor([2.0, 3.0, 0.0, 0.0]))
+        film.norm.running_mean.copy_(torch.tensor([1.0, 2.0]))
+        film.norm.running_var.copy_(torch.tensor([4.0, 9.0]))
+    audio = torch.ones(1, 2, 1, requires_grad=True)
+    singleton = film(audio, torch.ones(1, 3))
+    # Another valid-length group updates BN buffers before the shared backward.
+    film(torch.arange(20.0).reshape(1, 2, 10) * 10, torch.ones(1, 3))
+    singleton.sum().backward()
+    expected = torch.tensor([2.0 / (4.0 + 1e-5) ** 0.5,
+                             3.0 / (9.0 + 1e-5) ** 0.5]).reshape(1, 2, 1)
+    torch.testing.assert_close(audio.grad, expected)
 
 
 def test_film_correctly_forwards_input():

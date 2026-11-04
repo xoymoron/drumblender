@@ -1,13 +1,9 @@
-from typing import Literal
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 from torch import nn
 
-from drumblender.models.components import FiLM
-from drumblender.models.components import GatedActivation
-from drumblender.models.components import Pad
-from drumblender.models.components import TFiLM
+from drumblender.models.components import FiLM, GatedActivation, Pad, TFiLM
 
 __all__ = ["TCN"]
 

@@ -1,12 +1,15 @@
 import subprocess
+from types import SimpleNamespace
 from typing import Any
 
 import pytorch_lightning as pl
 import torch
 
-from drumblender.callbacks import CleanWandbCacheCallback
-from drumblender.callbacks import LogAudioCallback
-from drumblender.callbacks import SaveConfigCallbackWanb
+from drumblender.callbacks import (
+    CleanWandbCacheCallback,
+    LogAudioCallback,
+    SaveConfigCallbackWanb,
+)
 
 
 class FakeLogger(pl.loggers.WandbLogger):
@@ -53,7 +56,7 @@ def test_callback_correctly_interleaves_audio(monkeypatch, mocker):
     logger = FakeLogger(log_stub)
     model = FakeModule(logger)
 
-    trainer = None
+    trainer = SimpleNamespace(is_global_zero=True, logger=logger, global_step=1)
     callback.setup(trainer, model, "fit")
 
     # patch wandb.Audio inside the drumblender.callbacks module
@@ -72,8 +75,9 @@ def test_callback_correctly_interleaves_audio(monkeypatch, mocker):
         batch = (fake_targets, fake_conditioning)
 
         callback.on_train_batch_start(trainer, model, batch, 0)
-        model(fake_conditioning)
-        callback.on_train_batch_end(trainer, model, 0.0, batch, 0)
+        outputs = {"train_audio_target": fake_targets,
+                   "train_audio_reconstruction": model(fake_conditioning)}
+        callback.on_train_batch_end(trainer, model, outputs, batch, 0)
 
     callback.on_train_epoch_end(trainer, model)
 
@@ -88,7 +92,37 @@ def test_callback_correctly_interleaves_audio(monkeypatch, mocker):
     assert caption == "train/audio"
     assert actual_sample_rate == sample_rate
 
-    log_stub.assert_called_once_with({"train/audio": FAKE_RETURN})
+    log_stub.assert_called_once_with({"train/audio": FAKE_RETURN}, step=1)
+
+
+def test_audio_logging_concatenates_batches_with_different_durations(monkeypatch):
+    class RecordingLogger(pl.loggers.WandbLogger):
+        def __init__(self):
+            self.records = []
+
+        @property
+        def experiment(self):
+            return self
+
+        @property
+        def step(self):
+            return 0
+
+        def log(self, payload, step):
+            self.records.append(payload)
+
+    logger = RecordingLogger()
+    trainer = SimpleNamespace(logger=logger, is_global_zero=True, global_step=1)
+    callback = LogAudioCallback(False, True, False, n_batches=2)
+    monkeypatch.setattr("drumblender.callbacks.Audio", lambda audio, **kwargs: audio)
+    for length, amplitude in [(5, 1.0), (9, 2.0)]:
+        audio = torch.full((1, 1, length), amplitude)
+        callback._save_batch(audio, "val", "target")
+        callback._save_batch(-audio, "val", "reconstruction")
+    callback._log_audio("val", trainer)
+    expected = torch.cat([torch.ones(5), -torch.ones(5),
+                          torch.full((9,), 2.0), torch.full((9,), -2.0)])
+    torch.testing.assert_close(torch.from_numpy(logger.records[0]["validation/audio"]), expected)
 
 
 def test_clean_wandb_cache_callback_cleans_wandb_cache(monkeypatch, mocker):
@@ -145,6 +179,7 @@ def test_save_config_callback_renames_correctly(mocker, fs):
     class FakeTrainer:
         logger = FakeLogger()
         log_dir = "not_experiment_dir"
+        is_global_zero = True
 
     trainer = FakeTrainer()
     model = None
@@ -180,6 +215,7 @@ def test_save_config_callback_just_calls_setup_for_non_wandb_logger(mocker, fs):
     class FakeTrainer:
         logger = FakeNonWandbLogger()
         log_dir = "not_experiment_dir"
+        is_global_zero = True
 
     trainer = FakeTrainer()
     model = None

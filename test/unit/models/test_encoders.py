@@ -1,7 +1,6 @@
 import torch
 
-from drumblender.models.encoders import DummyParameterEncoder
-from drumblender.models.encoders import ModalAmpParameters
+from drumblender.models.encoders import DummyParameterEncoder, ModalAmpParameters
 
 
 def test_dummy_parameter_encoder_can_be_instantiated():

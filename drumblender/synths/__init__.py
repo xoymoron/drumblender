@@ -1,5 +1,4 @@
-from drumblender.synths.modal import modal_synth
-from drumblender.synths.modal import ModalSynth
+from drumblender.synths.modal import ModalSynth, modal_synth
 from drumblender.synths.noise import NoiseGenerator
 from drumblender.synths.transient import TransientTCN
 

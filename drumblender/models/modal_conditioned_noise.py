@@ -9,14 +9,14 @@ from __future__ import annotations
 from torch import nn
 from torch.nn import functional as F
 
-from drumblender.models.dac_style import DACStyleEncoder
+from drumblender.models.soundstream import SoundStreamEncoder
 
 
 class ModalConditionedNoise(nn.Module):
     def __init__(self, modal_channels: int = 64, noise_channels: int = 64,
                  bands: int = 128):
         super().__init__()
-        self.encoder = DACStyleEncoder(
+        self.encoder = SoundStreamEncoder(
             input_channels=1, hidden_channels=16, output_channels=noise_channels,
             strides=(2, 2, 4, 8), transpose_output=True,
         )

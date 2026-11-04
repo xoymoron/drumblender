@@ -1,7 +1,6 @@
 from typing import Optional
 
 import torch
-from einops import repeat
 
 from drumblender.models.tcn import TCN
 
@@ -48,8 +47,9 @@ class TransientTCN(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, embedding: Optional[torch.Tensor] = None):
         if hasattr(self, "transient_conditioning"):
-            cond = repeat(self.transient_conditioning, "1 c l -> b c l", b=x[0].size(0))
-            cond = torch.nn.functional.pad(cond, (0, x[0].size(-1) - cond.size(-1)))
+            cond = self.transient_conditioning[..., :x.size(-1)]
+            cond = torch.nn.functional.pad(cond, (0, x.size(-1) - cond.size(-1)))
+            cond = cond.expand(x.size(0), -1, -1)
             x = torch.cat([x, cond], dim=1)
 
         x = self.tcn(x, embedding)

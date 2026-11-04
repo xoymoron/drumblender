@@ -17,7 +17,6 @@ from typing import Iterable, Optional
 import numpy as np
 import soundfile as sf
 
-
 QUANTILES = {"p10": 0.10, "p90": 0.90, "p99": 0.99}
 
 

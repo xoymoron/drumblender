@@ -3,10 +3,7 @@ Methods for performing modal analysis on a CQT spectrogram
 Based on Sinusoidal Modeling Synthesis (SMS) Toolbox by Xavier Serra and Julius Smith
 Uses the nnAudio CQT implementation for better resolution with low frequncies
 """
-from typing import List
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch

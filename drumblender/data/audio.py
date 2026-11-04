@@ -1,27 +1,63 @@
 """
 Audio datasets
 """
-from collections import defaultdict
+
 import json
 import logging
 import os
+from collections import defaultdict
+from numbers import Integral
 from pathlib import Path
-from typing import List
-from typing import Literal
-from typing import Optional
-from typing import Tuple
-from typing import Union
+from typing import List, Literal, Optional, Tuple, Union
 
-import pandas as pd
 import torch
 import torchaudio
-from torch.utils.data import Dataset
-from torch.utils.data import random_split
-
+from torch.utils.data import Dataset, random_split
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
 log.setLevel(level=os.environ.get("LOGLEVEL", "INFO"))
+
+
+def _sample_pack_key(item: dict) -> str:
+    """Keep the complete recorded pack name, including nested components."""
+    return str(item.get("sample_pack_key") or "__root__").replace("\\", "/").strip("/")
+
+
+def _split_within_sample_packs(
+    metadata: dict,
+    keys: List[str],
+    split: str,
+    seed: int,
+    train_ratio: float,
+    val_ratio: float,
+) -> List[str]:
+    """Split files independently inside each pack before applying any filters."""
+    if split not in ("train", "val", "test"):
+        raise ValueError("Invalid split. Must be one of 'train', 'val', or 'test'.")
+    if train_ratio < 0 or val_ratio < 0 or train_ratio + val_ratio > 1:
+        raise ValueError("Require train >= 0, val >= 0, and train+val <= 1.")
+
+    by_pack = defaultdict(list)
+    for key in sorted(keys):
+        by_pack[_sample_pack_key(metadata[key])].append(key)
+
+    generator = torch.Generator().manual_seed(seed)
+    selected = []
+    for pack in sorted(by_pack):
+        items = by_pack[pack]
+        permutation = torch.randperm(len(items), generator=generator).tolist()
+        shuffled = [items[index] for index in permutation]
+        count = len(shuffled)
+        n_train = max(1, int(count * train_ratio)) if train_ratio > 0 else 0
+        n_val = min(int(count * val_ratio), count - n_train)
+        if split == "train":
+            selected.extend(shuffled[:n_train])
+        elif split == "val":
+            selected.extend(shuffled[n_train : n_train + n_val])
+        else:
+            selected.extend(shuffled[n_train + n_val :])
+    return selected
 
 
 class AudioDataset(Dataset):
@@ -45,8 +81,8 @@ class AudioDataset(Dataset):
         sample_rate: int,
         num_samples: Optional[int],
         split: Optional[str] = None,
-        seed: int = 42,
-        split_strategy: Literal["sample_pack", "random"] = "random",
+        seed: int = 20261106,
+        split_strategy: Literal["sample_pack", "random"] = "sample_pack",
         normalize: bool = False,
         sample_types: Optional[List[str]] = None,
         instruments: Optional[List[str]] = None,
@@ -89,7 +125,9 @@ class AudioDataset(Dataset):
 
     def __getitem__(self, idx) -> Tuple[torch.Tensor]:
         audio_filename = self.metadata[self.file_list[idx]]["filename"]
-        waveform, sample_rate = torchaudio.load(self.data_dir.joinpath(audio_filename))
+        waveform, sample_rate = torchaudio.load(
+            str(self.data_dir.joinpath(audio_filename))
+        )
 
         # Ensure sample rate matches configuration.
         assert sample_rate == self.sample_rate, "Sample rate mismatch."
@@ -110,11 +148,15 @@ class AudioDataset(Dataset):
                 waveform = waveform[:, : self.num_samples]
                 length = self.num_samples
             elif length < self.num_samples:
-                waveform = torch.nn.functional.pad(waveform, (0, self.num_samples - length))
-                length = self.num_samples
+                waveform = torch.nn.functional.pad(
+                    waveform, (0, self.num_samples - length)
+                )
 
             # Preserve the original fixed-shape invariant.
-            assert waveform.shape == (1, self.num_samples), "Incorrect input audio shape."
+            assert waveform.shape == (
+                1,
+                self.num_samples,
+            ), "Incorrect input audio shape."
         else:
             # Variable-length mode only enforces mono-channel shape.
             assert waveform.shape[0] == 1, "Expecting mono audio"
@@ -125,98 +167,28 @@ class AudioDataset(Dataset):
         # Return waveform and length for collate/bucketing logic.
         return (waveform, length)
 
-
     def _sample_pack_split(
         self, split: str, test_size: float = 0.1, val_size: float = 0.1
     ):
-        split_metadata = self._sample_pack_split_metadata(split, test_size, val_size)
-
-        # Convert to list for file list
-        self.file_list = split_metadata.index.tolist()
-        log.info(f"Number of samples in {split} set: {len(self.file_list)}")
-
-    def _sample_pack_split_metadata(
-        self, split: str, test_size: float = 0.1, val_size: float = 0.1
-    ):
-        """
-        Split the dataset into train, validation, and test sets. This creates splits
-        that are disjont with respect to sample packs and have same the proportion of
-        sample types. It performsn a greedy assignment of samples to splits, starting
-        with the test set, then the validation set, and finally the training set.
-
-        Args:
-            split: Split to return. Must be one of 'train', 'val', or 'test'.
-        """
-        if split not in ["train", "val", "test"]:
-            raise ValueError("Invalid split. Must be one of 'train', 'val', or 'test'.")
-
-        data = pd.DataFrame.from_dict(self.metadata, orient="index")
-
-        # Count the number of samples in each type (e.g. electric, acoustic)
-        data_types = data.groupby("type").size().reset_index(name="counts")
-
-        # Filter by sample types
-        if self.sample_types is not None:
-            data_types = data_types[data_types["type"].isin(self.sample_types)]
-            log.info(f"Filtering by sample types: {self.sample_types}")
-
-        for t in data_types.iterrows():
-            num_samples = t[1]["counts"]
-            sample_type = t[1]["type"]
-
-            # Group the samples by sample pack with counts and shuffle
-            sample_packs = (
-                data[data["type"] == sample_type]
-                .groupby("sample_pack_key")
-                .size()
-                .reset_index(name="counts")
-                .sample(frac=1, random_state=self.seed)
-            )
-
-            # Add a column for split
-            sample_packs["split"] = "train"
-
-            # Starting with the test set, greedily assign samples to splits -- if a
-            # sample pack has fewer samples than the number of samples needed for the
-            # split, assign all of the samples in the pack to the split.
-            for s, n in zip(("test", "val"), (test_size, val_size)):
-                split_samples = int(num_samples * n)
-                for i, row in sample_packs.iterrows():
-                    if row["counts"] <= split_samples and row["split"] == "train":
-                        split_samples -= row["counts"]
-                        sample_packs.loc[i, "split"] = s
-
-            # Assign the split to the samples in data
-            for i, row in sample_packs.iterrows():
-                data.loc[
-                    data["sample_pack_key"] == row["sample_pack_key"],
-                    "split",
-                ] = row["split"]
-
-        # Count the number of samples in each split, log as percentage of total
-        splits = data.groupby("split").size().reset_index(name="counts")
-        splits["percent"] = splits["counts"] / splits["counts"].sum()
-        log.info(f"Split counts:\n{splits}")
-
-        # Filter by instrument types if specified
-        if "instrument" in data.columns:
-            log.info(f"Insrumens in dataset: {data['instrument'].unique()}")
-            if self.instruments is not None:
-                log.info(f"Filtering by instruments: {self.instruments}")
-                data = data[data["instrument"].isin(self.instruments)]
-
-        # Filter by split
-        data = data[data["split"] == split]
-
-        # Logging
-        data_types = data.groupby("type").size().reset_index(name="counts")
-        log.info(f"Number of samples by type:\n {data_types}")
-
-        if "instrument" in data.columns:
-            inst_types = data.groupby("instrument").size().reset_index(name="counts")
-            log.info(f"Number of samples by instrument:\n {inst_types}")
-
-        return data
+        self.file_list = _split_within_sample_packs(
+            self.metadata,
+            sorted(self.metadata),
+            split,
+            self.seed,
+            1.0 - test_size - val_size,
+            val_size,
+        )
+        for field, allowed in (
+            ("type", self.sample_types),
+            ("instrument", self.instruments),
+        ):
+            if allowed is not None:
+                self.file_list = [
+                    key
+                    for key in self.file_list
+                    if self.metadata[key].get(field) in allowed
+                ]
+        log.info("Number of samples in %s set: %d", split, len(self.file_list))
 
     def _random_split(self, split: str):
         """
@@ -264,8 +236,8 @@ class AudioWithParametersDataset(Dataset):
         sample_rate: int,
         num_samples: Optional[int],
         split: Optional[str] = None,
-        seed: int = 42,
-        split_strategy: Literal["sample_pack", "random"] = "random",
+        seed: int = 20261106,
+        split_strategy: Literal["sample_pack", "random"] = "sample_pack",
         normalize: bool = False,
         sample_types: Optional[List[str]] = None,
         instruments: Optional[List[str]] = None,
@@ -275,8 +247,20 @@ class AudioWithParametersDataset(Dataset):
         expected_num_modes: Optional[int] = None,
         split_train_ratio: float = 0.8,
         split_val_ratio: float = 0.1,
+        modal_config_file: str = "modal_config.json",
+        preserve_analysis_clock: bool = False,
     ):
         super().__init__()
+        if num_samples is not None and num_samples > 0:
+            raise ValueError(
+                "AudioWithParametersDataset requires num_samples=None: fixed-length "
+                "cropping/padding changes the cached modal time grid."
+            )
+        if normalize:
+            raise ValueError(
+                "AudioWithParametersDataset requires normalize=False: audio-only "
+                "normalization would leave cached modal amplitudes unchanged."
+            )
         self.data_dir = Path(data_dir)
         self.meta_file = meta_file
         self.sample_rate = sample_rate
@@ -284,7 +268,6 @@ class AudioWithParametersDataset(Dataset):
         self.seed = seed
         self.split = split
         self.split_strategy = split_strategy
-        self.normalize = normalize
         self.sample_types = sample_types
         self.instruments = instruments
         self.sample_pack_keys = sample_pack_keys
@@ -294,9 +277,26 @@ class AudioWithParametersDataset(Dataset):
         self.expected_num_modes = expected_num_modes
         self.split_train_ratio = split_train_ratio
         self.split_val_ratio = split_val_ratio
+        # Explicit-clock consumers carry analysis timestamps into their renderer.
+        # The legacy renderers instead map every stored frame onto audio duration.
+        self.preserve_analysis_clock = preserve_analysis_clock
 
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Dataset dir not found: {self.data_dir}")
+
+        config_path = self.data_dir / modal_config_file
+        if not config_path.is_file():
+            raise ValueError(f"Missing modal_config timing provenance: {config_path}")
+        self.modal_config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.hop_length = self._positive_integer(self.modal_config, "hop_length")
+        cached_sample_rate = self._positive_integer(self.modal_config, "sample_rate")
+        if cached_sample_rate != self.sample_rate:
+            raise ValueError(
+                f"modal_config sample_rate {cached_sample_rate} != {self.sample_rate}"
+            )
+        self.modal_backend = self.modal_config.get("modal_backend")
+        if self.modal_backend not in ("original", "legacy", "hybrid", "stft", "cqt"):
+            raise ValueError("Missing or unsupported modal_config modal_backend.")
 
         with open(self.data_dir.joinpath(self.meta_file), "r") as f:
             self.metadata = json.load(f)
@@ -323,7 +323,10 @@ class AudioWithParametersDataset(Dataset):
             self.file_list = [
                 k
                 for k in self.file_list
-                if ("type" in self.metadata[k] and self.metadata[k]["type"] in sample_types)
+                if (
+                    "type" in self.metadata[k]
+                    and self.metadata[k]["type"] in sample_types
+                )
             ]
         if instruments is not None:
             self.file_list = [
@@ -339,30 +342,29 @@ class AudioWithParametersDataset(Dataset):
             self.file_list = [
                 k
                 for k in self.file_list
-                if self.top_level_pack(self.metadata[k]) in allowed_pack_keys
+                if (
+                    self.sample_pack_key(self.metadata[k]) in allowed_pack_keys
+                    or self.top_level_pack(self.metadata[k]) in allowed_pack_keys
+                )
             ]
 
         # Cache lengths for bucketing.
         self.lengths = []
         for k in self.file_list:
             item = self.metadata[k]
-            if "num_samples" in item:
-                self.lengths.append(int(item["num_samples"]))
-            else:
-                wav_path = self._audio_path(item)
-                try:
-                    info = torchaudio.info(wav_path)
-                    self.lengths.append(int(info.num_frames))
-                except Exception:
-                    w, _ = torchaudio.load(wav_path)
-                    self.lengths.append(int(w.shape[-1]))
+            self.lengths.append(self._positive_integer(item, "num_samples"))
 
     def __len__(self):
         return len(self.file_list)
 
     @staticmethod
+    def sample_pack_key(item: dict) -> str:
+        """Return the recorded pack identifier used for split membership."""
+        return _sample_pack_key(item)
+
+    @staticmethod
     def top_level_pack(item: dict) -> str:
-        """Group splice/* together, never by a nested vendor/sample-pack folder."""
+        """Select an entire collection when an existing config names its root."""
         relative = str(item.get("orig_relpath", "")).replace("\\", "/").strip("/")
         if "/" in relative:
             return relative.split("/", 1)[0]
@@ -376,42 +378,9 @@ class AudioWithParametersDataset(Dataset):
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
     ) -> List[str]:
-        if split not in ("train", "val", "test"):
-            raise ValueError("Invalid split. Must be one of 'train', 'val', or 'test'.")
-        if train_ratio < 0.0 or val_ratio < 0.0 or (train_ratio + val_ratio) > 1.0:
-            raise ValueError(
-                "Invalid split ratios: require train >= 0, val >= 0, train+val <= 1."
-            )
-
-        by_pack = defaultdict(list)
-        for key in keys:
-            pack_key = self.top_level_pack(self.metadata[key])
-            by_pack[pack_key].append(key)
-
-        g = torch.Generator().manual_seed(self.seed)
-        selected: List[str] = []
-
-        for pack_key in sorted(by_pack.keys()):
-            pack_items = sorted(by_pack[pack_key])
-            perm = torch.randperm(len(pack_items), generator=g).tolist()
-            shuffled = [pack_items[i] for i in perm]
-
-            n = len(shuffled)
-            n_train = int(n * train_ratio)
-            n_val = int(n * val_ratio)
-
-            # Ensure each pack contributes at least one train sample when possible.
-            if n > 0 and n_train == 0:
-                n_train = 1
-            if n_train + n_val > n:
-                n_val = max(0, n - n_train)
-
-            if split == "train":
-                selected.extend(shuffled[:n_train])
-            elif split == "val":
-                selected.extend(shuffled[n_train : n_train + n_val])
-            else:
-                selected.extend(shuffled[n_train + n_val :])
+        selected = _split_within_sample_packs(
+            self.metadata, keys, split, self.seed, train_ratio, val_ratio
+        )
 
         log.info(
             "AudioWithParametersDataset split='%s' strategy='sample_pack' size=%d",
@@ -466,35 +435,25 @@ class AudioWithParametersDataset(Dataset):
         item = self.metadata[key]
 
         wav_path = self._audio_path(item)
-        waveform, sr = torchaudio.load(wav_path)
-        assert sr == self.sample_rate, f"Sample rate mismatch: {sr} != {self.sample_rate}"
+        waveform, sr = torchaudio.load(str(wav_path))
+        assert sr == self.sample_rate, (
+            f"Sample rate mismatch: {sr} != {self.sample_rate}"
+        )
 
         # Mono-only policy: always use channel 0.
         waveform = waveform[:1, :]
         length = int(waveform.shape[-1])
 
-        # Fixed-length mode: pad or truncate.
-        if self.num_samples is not None and self.num_samples > 0:
-            target = int(self.num_samples)
-            if length > target:
-                waveform = waveform[:, :target]
-                length = target
-            elif length < target:
-                waveform = torch.nn.functional.pad(waveform, (0, target - length))
-                length = target
-
-        if self.normalize:
-            waveform = waveform / (waveform.abs().max() + 1e-9)
-
         if self.parameter_key not in item:
             raise KeyError(f"metadata missing '{self.parameter_key}' for key={key}")
 
         p_path = self.data_dir.joinpath(item[self.parameter_key])
-        params = torch.load(p_path)
+        params = torch.load(p_path, map_location="cpu", weights_only=True)
         if params.ndim != 3:
             raise ValueError(
                 f"Expected params [P,M,F], got {tuple(params.shape)} from {p_path}"
             )
+        self._validate_cache_item(key, item, length, params)
 
         if self.expected_num_modes is not None:
             m_expected = int(self.expected_num_modes)
@@ -506,6 +465,55 @@ class AudioWithParametersDataset(Dataset):
                 params = torch.cat([params, pad], dim=1)
 
         return waveform, params, length
+
+    @staticmethod
+    def _positive_integer(record: dict, field: str) -> int:
+        """Reject missing or coerced timing values instead of inventing a clock."""
+        value = record.get(field)
+        if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+            raise ValueError(
+                f"{field} must be a recorded positive integer; got {value!r}"
+            )
+        return int(value)
+
+    def _validate_cache_item(
+        self, key: str, item: dict, audio_length: int, params: torch.Tensor
+    ) -> None:
+        """Validate stored clocks before any mode-count adaptation or rendering."""
+        recorded_length = self._positive_integer(item, "num_samples")
+        analysis_length = self._positive_integer(item, "analysis_num_samples")
+        if audio_length != recorded_length:
+            raise ValueError(
+                f"{key}: audio num_samples={audio_length}, cache records {recorded_length}"
+            )
+        if analysis_length < recorded_length:
+            raise ValueError(
+                f"{key}: analysis_num_samples={analysis_length} < num_samples={recorded_length}"
+            )
+        if analysis_length != recorded_length and not self.preserve_analysis_clock:
+            raise ValueError(
+                f"{key}: analysis_num_samples={analysis_length} != num_samples="
+                f"{recorded_length}; re-extract this cache with the current "
+                "extractor to preserve the modal time grid."
+            )
+        if item.get("modal_backend") != self.modal_backend:
+            raise ValueError(f"{key}: modal_backend differs from modal_config.")
+        expected_frames = analysis_length // self.hop_length + 1
+        frames = params.shape[-1]
+        # Older CQT extraction exported ceil(L / hop) frames on its empty-mode
+        # fallback. Accept that documented zero-only exception, not arbitrary grids.
+        legacy_empty_frames = (analysis_length + self.hop_length - 1) // self.hop_length
+        legacy_empty = (
+            self.modal_backend in ("original", "legacy")
+            and frames == legacy_empty_frames
+            and params.shape[0] == 3
+            and not torch.any(params[1]).item()
+        )
+        if frames != expected_frames and not legacy_empty:
+            raise ValueError(
+                f"{key}: modal frame count={frames}, expected {expected_frames} "
+                f"from analysis_num_samples={analysis_length}, hop_length={self.hop_length}"
+            )
 
     def _audio_path(self, item: dict) -> Path:
         if self.audio_dir is not None and item.get("orig_relpath"):

@@ -28,6 +28,7 @@ def main():
         "resume",
         "checkpoint_every",
         "max_files",
+        "no_tqdm",
     }
     for index in range(args.num_shards):
         shard_name = f"shard_{index}"

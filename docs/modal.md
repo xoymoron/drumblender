@@ -165,8 +165,12 @@ python -u -m scripts.build_modal_features_multi_gpu \
 min length 10, threshold -80 dB, diff threshold 5다.
 동일 mode ceiling으로 비교하려면 `--num_modes 128`과 별도 output을 사용한다.
 이 명령은 현재 processed sample 길이를 사용한다. 원 논문의 2초 고정 dataset protocol을
-재현한 것은 아니며, 짧은 파일은 기존 nnAudio reflect-padding fallback이 추가 padding 후 재시도한다.
-`analysis_num_samples`에 실제 분석 길이를 기록하므로 길이와 padding을 확인한 뒤 시간을 비교한다.
+재현한 것은 아니며, 짧은 파일에서 nnAudio reflect padding이 실패하면 같은 waveform에
+constant boundary padding으로 재시도한다. 분석할 waveform 자체를 늘리지는 않는다.
+`short_cqt_boundary_policy`에 이 정책을 기록하고, `analysis_num_samples`와 `num_samples`를
+일치시킨다. 두 길이가 다른 이전 cache는 기존 renderer를 쓰는 numbered ablation과
+modal-control 경로에서 재추출 안내와 함께 거절한다.
+
 `analysis_seconds`와 `file_seconds`는 원본에도 기록하지만 NEW의 단계별/source/confidence 진단은 없다.
 GPU 실행 연결과 CPU 실행 검증을 GPU 장비에서의 속도 보장으로 해석하지 않는다.
 
@@ -313,7 +317,7 @@ Frequency는 연속 적분하고 initial-phase 변경은 다음 trigger에 적�
 ```text
 modal cache → modal encoder/decoder → fitted modal → ModalSynth → m
                             │ detached context
-original x - detach(m) → DAC-style encoder → conditioned noise bands → NoiseGenerator → n
+original x - detach(m) → SoundStream encoder → conditioned noise bands → NoiseGenerator → n
                                                                        output = m+n
 ```
 
@@ -357,7 +361,7 @@ SAE/VFM 적용 자체나 Hybrid 사용 자체만으로 novelty를 주장하지 �
 |---|---|
 | `modal` | Modal encoder/decoder; observed parameter anchor, circular initial-phase loss, rendered-modal MR-STFT, masked reconstruction |
 | `noise` | Modal 고정; mixture MR-STFT와 약한 detached-residual spectral target |
-| `joint` | 두 branch fine-tuning; modal anchor 유지, modal LR은 noise의 0.1배 |
+| `joint` | 두 branch fine-tuning; modal anchor 유지, 두 branch에 같은 initial LR 적용 |
 | `patterns` | 최종 backbone 고정; temporal SAE만 sparse hidden reconstruction |
 
 Modal target은 extracted modal을 합성한 waveform이며 raw mixture를 modal 단독 target으로 쓰지 않는다.
@@ -395,9 +399,15 @@ Joint를 다시 학습하면 dictionary 좌표도 달라지므로 patterns를 �
 
 GPU 한 대는 `--devices 1`, CPU는 `--accelerator cpu --devices 1`이다.
 `--devices 0,1`은 CUDA visibility 적용 후 logical IDs다.
-기본 batch size 2는 GPU당 값이며 OOM이면 `--batch_size 1`을 사용한다.
+Batch size는 GPU당 8, gradient accumulation은 8로 고정한다.
+GPU 한 대의 nominal effective batch size는 64이며 GPU 수에 비례한다.
+모든 stage는 Adam, initial LR `1e-4`, weight decay 없음, seed `20261106`을 사용한다.
+ReduceLROnPlateau는 epoch 단위 `validation/loss`를 monitor하며 patience 10,
+factor 0.5, minimum LR `6.25e-6`, PyTorch 기본 threshold를 사용한다.
+EarlyStopping은 같은 metric에 patience 20과 기본 `min_delta=0`을 적용한다.
+각 stage의 maximum epochs는 150이며 stage별 LR 배율과 epoch 수는 두지 않는다.
 긴 sample은 전체 길이를 처리하므로 differentiable modal rendering의 memory를 확인해야 한다.
-Width, loss 계수, epochs는 config의 출발값이며 최적값으로 검증된 것은 아니다.
+Width와 loss 계수는 config의 출발값이며 최적값으로 검증된 것은 아니다.
 기존 `drumblender fit` 설정과 전용 task/collate/optimizer 경로를 섞지 않는다.
 
 `runs/modal_control/<stage>/`에는 `run_config.json`, `logs/version_*/metrics.csv`,
@@ -409,7 +419,7 @@ SAE `feature_fraction`은 batch 내 feature 사용률이지 corpus dead-feature 
 python -m scripts.audition_modal_control \
   --checkpoint runs/modal_control/patterns/checkpoints/last.ckpt \
   --feature_root "$MODAL_ROOT" --processed_root ../dataset/processed \
-  --amount 0.5 --noise_link 0 --seed 7 --device cuda:0 \
+  --amount 0.5 --noise_link 0 --seed 20261106 --device cuda:0 \
   --output insights/modal_control_fixed_noise
 ```
 
@@ -472,3 +482,78 @@ python -m pytest \
 | [Discovering and Steering Interpretable Concepts in Large Generative Music Models, ICLR 2026](https://arxiv.org/html/2505.18186) | SAE discovery/steering 참고. Temporal modal dictionary는 응용 가설이며 language labeling은 제외 |
 | [SAEs Are Good for Steering — If You Select the Right Features, EMNLP 2025](https://aclanthology.org/2025.emnlp-main.519/) | Activation 크기와 실제 output steering 효과를 구분하고 audition으로 선별 |
 | [Controlled Generation with Equivariant Variational Flow Matching, ICML 2025](https://proceedings.mlr.press/v267/eijkelboom25a.html) | Reference/feature target 기반 후속 variation 가설. Molecular symmetries나 원문의 성능 주장은 이식하지 않음 |
+
+## Analyzer and renderer audit
+
+Boundary gain now uses the Hann mass inside the recorded signal, for both STFT
+windows and every CQT kernel. CPU and Torch frontends share the same calculation;
+CQT normalizes the two integer observations before interpolating coefficients.
+This removes zero-padding attenuation, not the time averaging of a long kernel.
+New exports record `analyzer_version=hybrid-observed-window-v2` in configuration
+and each metadata item. Resume rejects older/unversioned NEW caches; re-extract
+into a separate directory. Path IDs now normalize separators before hashing.
+Existing Windows cache IDs are not renamed in place.
+
+Synthetic CPU checks (48 kHz, one second, strongest mode, sine starting at zero):
+
+| Check | Before | After |
+|---|---:|---:|
+| Frame-zero amplitude / true amplitude, 55 Hz | 0.509 | 1.000 |
+| Same, 447 Hz | 0.541 | 1.019 |
+| Same, 1234 Hz | 0.662 | 1.063 |
+| 60 Hz kick, amplitude `0.5*exp(-t/0.15)`, SNR | 6.42 dB | 11.78 dB |
+| Kick envelope peak time | 98.39 ms | 2.65 ms |
+
+The kick's first-frame amplitude is still only 0.606 of its initial analytic
+envelope. A scalar gain cannot undo nonstationary averaging or the truncated
+spectral lobe. These results are frontend checks, not learned reconstruction.
+
+Changing `filter_scale` remains a user decision. At 60 Hz / 24 bins per octave:
+
+| Scale | Nominal window length | Nominal bandwidth |
+|---|---:|---:|
+| 1 | 568.8 ms | 1.76 Hz |
+| 0.5 | 284.4 ms | 3.52 Hz |
+| 0.25 | 142.2 ms | 7.03 Hz |
+
+These bandwidths are not measured two-tone resolution limits. Boundary-only
+least squares could retain the long-kernel frequency estimate while fitting
+local sine/cosine and optionally local amplitude slope on available samples.
+It adds conditioning/model-selection issues and cannot infer an arbitrary onset
+envelope uniquely. Neither Q reduction nor this envelope model is implemented.
+
+ModalSynth accumulates the represented angular frequencies in float64, wraps
+before sine evaluation, and casts the carrier back to the original dtype.
+Against the same float32 frequency promoted to float64, first/last-second SNR
+for a 20-second 12.3 kHz tone changes from 58.57/28.85 dB to 153.76/153.69 dB;
+5 kHz changes from 67.55/34.87 dB to 153.72/153.74 dB. Gradients remain connected.
+This isolates accumulation error: quantization already present in a float32
+frequency parameter is not recovered.
+
+Cache builders refuse existing cache data without `--resume`; progress/log-only
+worker directories are allowed. Empty original/legacy exports now use
+`L//hop+1`, and merge ignores `no_tqdm`. Short-clip original/legacy retry already
+uses constant transform padding without extending waveform length. Historical
+all-zero legacy caches with the old frame count remain a loader compatibility
+case; new exports no longer produce that count.
+
+Legacy inference still uses `drumblender/cli.py` and the legacy analyzer.
+Legacy/original grid and initial-phase alignment changes remain undecided;
+original's unmatched phase-list deletion and unguarded interpolation are not
+changed as part of this audit. The strict peak detector cannot select an exactly
+flat local maximum, though explicit flat indices passed to interpolation divide
+by zero. Do not call these original exports equivalent to the NEW frame/phase
+convention. The extraction-stats module is an imported helper, not a CLI.
+
+Server commands (run manually; no real-data/GPU job was run locally):
+
+```bash
+# Corrected Hybrid cache; use a new directory, never overwrite the old cache.
+python -m scripts.build_modal_features_multi_gpu --modal_backend hybrid --gpus 0,1 --num_modes 128 --processed_root ../dataset/processed --out_dir ../dataset/modal_features/processed_modal_window_v2_2gpu --checkpoint_every 100 --resume
+
+# GPU boundary checks, including CQT and both STFT frontend paths.
+python -m pytest -q -p no:cacheprovider -o addopts="" test/unit/utils/test_modal_audit.py -k cuda
+
+# First/last-second precision of 20-second tones on CUDA; prints only.
+python -m test.unit.utils.test_modal_audit --device cuda
+```

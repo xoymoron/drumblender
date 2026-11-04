@@ -146,11 +146,11 @@ def test_drumblender_passes_lengths_to_audio_encoders_that_accept_them():
         def __init__(self, output):
             super().__init__()
             self.output = output
-            self.lengths_seen = None
+            self.lengths_seen = []
 
         def forward(self, x, lengths=None):
-            self.lengths_seen = lengths
-            return self.output
+            self.lengths_seen.extend(lengths.tolist())
+            return self.output[:x.shape[0]]
 
     class FakeNoiseSynth(torch.nn.Module):
         def forward(self, params, length=None):
@@ -162,7 +162,9 @@ def test_drumblender_passes_lengths_to_audio_encoders_that_accept_them():
     num_modes = 16
     num_steps = 32
 
-    loss_fn = lambda pred, target: torch.tensor(0.0)
+    def loss_fn(pred, target):
+        return torch.tensor(0.0)
+
     noise_encoder = FakeNoiseEncoder(torch.randn(batch_size, 8, 128))
 
     model = DrumBlender(
@@ -179,5 +181,4 @@ def test_drumblender_passes_lengths_to_audio_encoders_that_accept_them():
 
     model(x, p, lengths=lengths)
 
-    assert noise_encoder.lengths_seen is not None
-    torch.testing.assert_close(noise_encoder.lengths_seen, lengths)
+    assert noise_encoder.lengths_seen == lengths.tolist()

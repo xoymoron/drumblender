@@ -10,6 +10,26 @@ import yaml
 from drumblender import cli
 
 
+def test_short_clip_inference_keeps_the_original_sample_and_frame_counts(monkeypatch, mocker):
+    class EchoModel(torch.nn.Module):
+        def forward(self, audio, params):
+            assert params.shape == (1, 3, 1, 4)
+            return audio
+
+    settings = dict(sample_rate=8000, num_samples=None, num_modes=1,
+                    hop_length=32, fmin=1000, n_bins=12, bins_per_octave=12,
+                    min_length=1, threshold=-90.0, diff_threshold=5.0)
+    mocker.patch.object(cli.model_utils, "load_model",
+                        return_value=(EchoModel(), SimpleNamespace(**settings)))
+    monkeypatch.setattr("sys.argv", ["drumblender-synth", "cfg.yaml", "model.ckpt",
+                                     "in.wav", "out.wav"])
+    audio = (torch.arange(100) * (2 * torch.pi * 1500 / 8000)).sin()[None]
+    mocker.patch.object(cli.torchaudio, "load", return_value=(audio, 8000))
+    save = mocker.patch.object(cli.torchaudio, "save")
+    cli.inference()
+    torch.testing.assert_close(save.call_args.args[1], audio)
+
+
 @pytest.mark.parametrize("referenced", [False, True])
 @pytest.mark.parametrize("fixed_length", [None, 4096])
 def test_inference_uses_resolved_data_config(

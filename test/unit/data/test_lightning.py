@@ -2,18 +2,22 @@
 Tests for the data.lightning module.
 """
 
+import json
 from pathlib import Path
 
 import pytest
 import torch
 from torch.utils.data import DataLoader
 
-from drumblender.data import AudioDataModule
-from drumblender.data import AudioWithParametersDataset
-from drumblender.data import ModalDataModule
+from drumblender.data import (
+    AudioDataModule,
+    AudioWithParametersDataset,
+    ModalDataModule,
+)
 from drumblender.data.collate import pad_audio_params_collate
 
 TESTED_MODULE = "drumblender.data.lightning"
+TEST_AUDIO_SAMPLES = 144
 
 
 def test_waveform_only_collation_preserves_valid_lengths():
@@ -69,7 +73,7 @@ def kick_datamodule(fs, mocker):
     fs.create_dir(data.data_dir)
     fs.create_file(Path(data.data_dir).joinpath(data.meta_file))
     mocker.patch("drumblender.data.audio.json.load", side_effect=processed_metadata)
-    return AudioDataModule()
+    return AudioDataModule(num_samples=TEST_AUDIO_SAMPLES)
 
 
 def test_audio_datamodule_setup_train(kick_datamodule):
@@ -77,25 +81,25 @@ def test_audio_datamodule_setup_train(kick_datamodule):
     assert len(kick_datamodule.train_dataset) == 80
     assert len(kick_datamodule.val_dataset) == 10
     with pytest.raises(AttributeError):
-        kick_datamodule.test_dataset
+        _ = kick_datamodule.test_dataset
 
 
 def test_audio_datamodule_setup_val(kick_datamodule):
     kick_datamodule.setup("validate")
     assert len(kick_datamodule.val_dataset) == 10
     with pytest.raises(AttributeError):
-        kick_datamodule.train_dataset
+        _ = kick_datamodule.train_dataset
     with pytest.raises(AttributeError):
-        kick_datamodule.test_dataset
+        _ = kick_datamodule.test_dataset
 
 
 def test_audio_datamodule_setup_test(kick_datamodule):
     kick_datamodule.setup("test")
     assert len(kick_datamodule.test_dataset) == 10
     with pytest.raises(AttributeError):
-        kick_datamodule.train_dataset
+        _ = kick_datamodule.train_dataset
     with pytest.raises(AttributeError):
-        kick_datamodule.val_dataset
+        _ = kick_datamodule.val_dataset
 
 
 def test_audio_datamodule_train_data(kick_datamodule, mocker):
@@ -139,7 +143,9 @@ def processed_modal_metadata(filename: str):
             "filename": f"kick_{i}.wav",
             "filename_modal": f"kick_{i}_modal.wav",
             "features": f"kick_{i}.pt",
-            "num_samples": data.num_samples,
+            "num_samples": TEST_AUDIO_SAMPLES,
+            "analysis_num_samples": TEST_AUDIO_SAMPLES,
+            "modal_backend": "hybrid",
             "sample_pack_key": "pack_a",
             "type": "electro",
         }
@@ -149,9 +155,21 @@ def processed_modal_metadata(filename: str):
 
 def kick_modal_datamodule(fs, mocker, **kwargs):
     # Mock the dataset directory and metadata file
+    if kwargs.get("dataset_class") is not AudioWithParametersDataset:
+        kwargs.setdefault("num_samples", TEST_AUDIO_SAMPLES)
     data = ModalDataModule(**kwargs)
     fs.create_dir(data.data_dir)
     fs.create_file(Path(data.data_dir).joinpath(data.meta_file))
+    fs.create_file(
+        Path(data.data_dir) / "modal_config.json",
+        contents=json.dumps(
+            {
+                "sample_rate": data.sample_rate,
+                "hop_length": 16,
+                "modal_backend": "hybrid",
+            }
+        ),
+    )
     mocker.patch(
         "drumblender.data.audio.json.load", side_effect=processed_modal_metadata
     )
@@ -164,7 +182,7 @@ def test_modal_datamodule_setup_train(fs, mocker):
     assert len(dm.train_dataset) == 80
     assert len(dm.val_dataset) == 10
     with pytest.raises(AttributeError):
-        dm.test_dataset
+        _ = dm.test_dataset
 
 
 def test_modal_datamodule_setup_val(fs, mocker):
@@ -172,9 +190,9 @@ def test_modal_datamodule_setup_val(fs, mocker):
     dm.setup("validate")
     assert len(dm.val_dataset) == 10
     with pytest.raises(AttributeError):
-        dm.test_dataset
+        _ = dm.test_dataset
     with pytest.raises(AttributeError):
-        dm.train_dataset
+        _ = dm.train_dataset
 
 
 def test_modal_datamodule_setup_test(fs, mocker):
@@ -182,9 +200,9 @@ def test_modal_datamodule_setup_test(fs, mocker):
     dm.setup("test")
     assert len(dm.test_dataset) == 10
     with pytest.raises(AttributeError):
-        dm.val_dataset
+        _ = dm.val_dataset
     with pytest.raises(AttributeError):
-        dm.train_dataset
+        _ = dm.train_dataset
 
 
 def test_modal_datamodule_train_data(fs, mocker):
@@ -224,7 +242,7 @@ def test_modal_datamodule_audio_param_dataset_train(fs, mocker):
     mock_audio_load = mocker.patch(
         "drumblender.data.audio.torchaudio.load",
         return_value=(
-            torch.rand(1, dm.num_samples),
+            torch.rand(1, TEST_AUDIO_SAMPLES),
             dm.sample_rate,
         ),
     )
@@ -235,11 +253,14 @@ def test_modal_datamodule_audio_param_dataset_train(fs, mocker):
         return_value=torch.rand(3, 4, 10),
     )
 
-    audio_batch, parameters, lengths = next(iter(train_loader))
+    audio_batch, parameters, lengths, frame_lengths = next(iter(train_loader))
 
-    assert audio_batch.shape == (dm.batch_size, 1, dm.num_samples)
-    torch.testing.assert_close(lengths, torch.full((dm.batch_size,), dm.num_samples))
+    assert audio_batch.shape == (dm.batch_size, 1, TEST_AUDIO_SAMPLES)
+    torch.testing.assert_close(
+        lengths, torch.full((dm.batch_size,), TEST_AUDIO_SAMPLES)
+    )
     assert parameters.shape == (dm.batch_size, 3, 4, 10)
+    torch.testing.assert_close(frame_lengths, torch.full((dm.batch_size,), 10))
 
     assert mock_audio_load.call_count == dm.batch_size
     assert mock_feature_load.call_count == dm.batch_size

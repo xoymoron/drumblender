@@ -6,13 +6,13 @@ Run from the repository root with ``python -m scripts.build_modal_features_multi
 """
 
 import argparse
-from contextlib import ExitStack
 import json
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
+from contextlib import ExitStack
+from pathlib import Path
 from time import monotonic, sleep
 
 from tqdm import tqdm
