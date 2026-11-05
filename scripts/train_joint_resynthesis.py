@@ -7,7 +7,7 @@ import pytorch_lightning as pl
 import torch
 import yaml
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers import CSVLogger, WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 
@@ -91,7 +91,19 @@ def main():
         if settings["devices"] > 1
         else "auto"
     )
-    logger = CSVLogger(str(args.output), name="joint")
+    loggers = [CSVLogger(str(args.output), name="joint")]
+    tracking = config.get("wandb", {})
+    if tracking.get("enabled", False):
+        args.output.mkdir(parents=True, exist_ok=True)
+        loggers.append(
+            WandbLogger(
+                entity=tracking["entity"],
+                project=tracking["project"],
+                name=args.output.name,
+                save_dir=str(args.output),
+                log_model=False,
+            )
+        )
     callbacks = [
         ModelCheckpoint(
             monitor="val_loss",
@@ -111,7 +123,7 @@ def main():
         max_epochs=settings["max_epochs"],
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
-        logger=logger,
+        logger=loggers,
         callbacks=callbacks,
         replace_sampler_ddp=True,
         num_sanity_val_steps=0,

@@ -42,7 +42,7 @@ None. Both TBDs were filled on 2026-11-05 (see above).
 - Method prose written on 2026-11-05 (user: "assume the implementation is done"). It describes the spec as implemented; nothing in it is a measured result. Remaining TBD: control (feature) selection. A system-diagram figure is still missing (TODO comment at the top).
 - Facts in the Method prose that rest on the spec rather than on code that exists today: encoder strides/channels, set pooling, GRU trunk, correction bounds, 256-band bank, TCN layout, loss sizes, SAE edit rule. The 20 s phase-accuracy sentence rests on the spec's CPU check of modal_cycles.py (constant tones, max error below 1e-4 rad). Recheck all of these against the final code.
 - New citations, all verified on the publisher pages: `lee2019set` (PMLR 97), `cho2014learning` (ACL Anthology D14-1179), `perez2018film` (AAAI OJS; no page numbers listed; `number` dropped because the class's BibTeX style rejects volume plus number). Simionato's MR-STFT + RMS-energy MAE loss was confirmed in the article text.
-- Page budget after Method: 16 PDF pages; Results and Conclusion start on page 11, so the main text already reaches the 11-page limit before Results, Abstract, and Conclusion are written. Cuts will be needed (Related Work cut order is listed below; Method candidates: the analyzer detail sentences and the phase-accumulation sentence).
+- Page budget: 16 PDF pages after the first Method draft; 14 pages after the abstraction pass of 2026-11-05, with Results, Conclusion, and References starting on page 9.
 - Method citations used: Set Transformer (set pooling); Hayes 2023 and DrumBlender (bounded frequency correction); NoiseBandNet (band layout); DrumBlender (TCN); GRU; FiLM; DDSP; Simionato (loss).
 - Citation review applied on 2026-11-05 (each claim checked against the source text):
   - Added `waissbluth2022synthesis` to Related Work B2 (AIMC 2022; VAE that reconstructs snare samples as sparse mixtures of a small fixed library, latent moves swap samples in and out). The B2 contrast sentence now says the parameters come from an analysis of the recording rather than a fixed library. Venue string is the PDF footer; no DOI found.
@@ -61,22 +61,22 @@ Sources: `rawdata/DATASET_STATS.md` (raw count, sample rates); `PROCESSING.md` a
 Decisions (user, 2026-11-05):
 - Every sample pack stays undisclosed. No pack names, no dataset citations (Prockup et al. 2013 and the Dynamic Percussion Dataset were removed from the text and the bib), no URL footnotes, and no "nine sources".
 - No instrument-label counts (kick, snare, tom, cymbal) in the paper.
-- The Dataset text states: 17,346 collected samples from commercial and freely available packs; highly diverse, including tonal percussion (bells, marimbas, xylophones); selected as one-shots with a single strike and a single sound event; sample rate of at least 44.1 kHz; up to 20 s so that long-tailed instruments are covered.
+- The Dataset text states (abstraction pass, 2026-11-05): samples collected from commercial and freely available packs, with no raw count; highly diverse, including tonal percussion (bells, marimbas, xylophones); selected as one-shots with a single strike and a single sound event; sample rate of at least 44.1 kHz; up to 20 s so that long-tailed instruments are covered.
 - Preprocessing text keeps only: larger-RMS channel kept as mono for stereo, resampling to 48 kHz, leading-silence trim at -65 dB, trailing silence kept, no normalization. Decode, near-zero, and silent-file rejection are not described.
-- "Pack-level split" is written as what the code does: an 80/10/10 split within each top-level pack folder. It is not a held-out-pack split; every pack appears in the test set. The text states this limitation.
+- The split is written as an 80/10/10 split within each source pack, applied to about 17,000 samples after preprocessing (user, 2026-11-05). The test-set count and the sentence on stratified versus held-out packs were removed; the stratified split remains a candidate for Limitations.
 - The results table's pack names were replaced with Pack A–I in table order: A DynamicPercussion, B IndieDrums, C MDLib2, D Splice, E TidalCycles808, F TriSamples, G TriSamples808, H drumthrasher, I musicradar-drum-samples. Keep this mapping out of the manuscript. `scripts/compile_results.py` writes the real names, so a regenerated table must be relabelled again.
 - The baseline equation is written as x̂ = S + T(S) + N, matching `transient_parallel: true` and `transient_takes_noise: false`.
-- Training settings are stated for the baseline only. Whether the proposed model uses the same settings is TBD in Implementation Details.
+- Training is one subsection for both systems (`sec:exp-train`; `sec:exp-impl` was removed): same Adam schedule; nominal batch 32 for both systems (proposed: 1 per GPU × 2 GPUs × 16 accumulation, `cfg/joint_resynthesis.yaml` and spec section 15; corrected from 64 on 2026-11-05), plus gradient clipping 1.0 for the proposed model. Seed and parameter counts were removed (user edit in Overleaf).
 - Adam, Parallel WaveGAN (MR-STFT), and auraloss are cited. Parallel WaveGAN is co-authored by Eunwoo Song and is cited in the third person.
 
 Open checks:
-- The 17,346 figure is the raw collection. Samples removed in preprocessing (over 20 s, silent, near-zero, undecodable) make the used count smaller; the test set of 1,728 suggests about 17.2k. Fill the TBD with the server metadata count.
+- Internal record only: the raw collection had 17,346 files and the test set 1,728; the paper now says "about 17,000" after preprocessing.
 - `rawdata/CITATION.md` (not used in the paper) names Vesa Välimäki as the Dynamic Percussion Dataset author; the Zenodo record lists only Elias Veikko Juhani Nieminen.
 - "All systems are scored by the same evaluation code from exported reconstruction and target waveforms": confirm that the baseline numbers come from `drumblender/scripts/compile_results.py` rescoring of exported WAVs.
 - SF in this evaluation differentiates magnitude along time. The released DrumBlender code (`jorshidrumblender/drumblender/metrics.py`) differentiates along frequency, so these SF values are not comparable with the published DrumBlender table.
 - LSD uses n_fft = 8092 (not 8192), inherited from the DrumBlender implementation; the text states 8092.
 - No per-instrument-class results (user decision, 2026-11-05). The promise was removed from Introduction contribution 4 and the TBD from Evaluation; results are reported overall and per pack only.
-- TBD in the text: post-preprocessing and per-subset counts, GPU type, the checkpoint used for testing (the table shows epoch036 and epoch047), and control evaluation criteria.
+- TBD in the text: GPU type and control evaluation criteria.
 
 ## Related Work: decisions taken in the draft
 

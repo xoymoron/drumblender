@@ -25,7 +25,7 @@ The reported baseline scores are therefore not a reproduction of the published r
 \subsection{Training}
 \label{sec:exp-train}
 Both systems are trained with Adam \citep{kingma2015adam} at a learning rate of $10^{-4}$, which is halved when the validation loss stops improving, and training stops early when it no longer improves, after at most 150 epochs.
-The baseline uses a nominal batch size of 32, and the proposed model uses a nominal batch size of 64 with gradient-norm clipping at 1.0.
+Both systems use a nominal batch size of 32, and the proposed model additionally clips the gradient norm at 1.0.
 \textbf{[TBD: GPU type.]}
 
 \subsection{Evaluation}
