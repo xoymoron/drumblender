@@ -3,10 +3,9 @@
 
 % B1. Signal models, modal analysis, and differentiable percussion models.
 \paragraph{Analysis and synthesis of percussive sound.}
-Signal models of drum sounds predate deep learning: the drum variant of the Karplus--Strong algorithm randomly inverts the sign of the averaged feedback sample, so that the delay length sets the decay of a noise burst rather than a pitch \citep{karplus1983digital}.
+Signal models of drum sounds predate deep learning, as in the drum variant of the Karplus--Strong algorithm, which turns a noise burst into an unpitched decaying sound \citep{karplus1983digital}.
 Modal approaches instead describe a drum as a set of decaying modes derived from recordings or measurements.
-\citet{kirby2021evolution} analyzed the pitch glide of each mode of a tom-tom struck at 67 intensities with the discrete cosine transform, and synthesized modes at intermediate intensities by interpolation.
-\citet{nagata2025sound} synthesized drum sounds from transfer functions obtained by experimental modal analysis and projected onto the modes within a frequency band of interest.
+\citet{kirby2021evolution} modeled the pitch glide of each mode of a tom-tom across strike intensities, and \citet{nagata2025sound} synthesized drum sounds from transfer functions obtained by experimental modal analysis.
 These models reproduce a particular instrument closely, but they are built from that instrument rather than learned across a heterogeneous sample library.
 Differentiable modal synthesis learns such parameters from data, for example by predicting modal resonators from the shape of an object \citep{diaz2023rigid}.
 Learning the frequencies themselves is harder, because the loss surface over sinusoidal frequency is non-convex and contains many local minima \citep{hayes2023sinusoidal}.
@@ -22,8 +21,8 @@ Its transient component retains the modal-driven TCN of DrumBlender, but restric
 Beyond the descriptor-conditioned models discussed in \sectionref{sec:intro}, neural drum synthesis has explored several generative families and forms of control.
 \citet{drysdale2020adversarial} conditioned a WaveGAN-based model on the drum class and explored its latent space by interpolation.
 StyleWaveGAN adapts a style-based generator to raw waveforms and combines discrete drum-type control with continuous perceptual descriptors and per-class amplitude envelopes \citep{lavault2022stylewavegan}.
-CRASH applies score-based diffusion directly to raw audio and supports class-conditional sampling, inpainting, interpolation, and the regeneration of an existing sound from its latent code under a deterministic sampler \citep{rouard2021crash}.
-\citet{ramires2022study} compared ways of steering a style-based drum generator in a user study, in which directions found without supervision by closed-form factorization were rated slightly higher than random latent navigation and supervised timbral-feature directions, although the differences were not statistically significant.
+CRASH applies score-based diffusion directly to raw audio and can regenerate an existing sound from its latent code under a deterministic sampler \citep{rouard2021crash}.
+In a user study of a style-based drum generator, unsupervised latent directions were rated slightly higher than random and supervised ones, although not significantly \citep{ramires2022study}.
 \citet{drysdale2024latent} explored the intermediate latent space of a style-based drum generator through vector arithmetic, principal-component sliders, and two-dimensional maps.
 \citet{waissbluth2022synthesis} instead reconstructed snare drum samples as sparse mixtures of a small fixed sample library with a variational autoencoder, so that moving through its latent space swaps samples in and out of the mixture.
 In these systems, an existing sample can be edited only through the generator's own representation of it, obtained by an encoder or by inversion \citep{nistal2022drumganvst,rouard2021crash}, so the edit applies to the generator's approximation of the sample.
@@ -35,6 +34,6 @@ Neural audio codecs learn compact latent representations for high-fidelity recon
 Variational autoencoders impose a prior that makes the latent space easier to traverse, and \citet{esling2018generative} further aligned latent distances between instrument classes with perceptual timbre spaces, which requires instrument labels and human dissimilarity ratings.
 Sparse autoencoders offer a post-hoc alternative that decomposes the activations of a trained model into a large dictionary of sparsely active features \citep{gao2025scaling}.
 Such features have been identified in audio latent spaces \citep{paek2025learning} and used to steer large generative music models \citep{singh2026discovering}.
-For percussion, \citet{shier2024realtime} learned without labels to map onset features of acoustic snare hits to parameter changes of a differentiable synthesizer modeled on the TR-808 snare, by matching differences between hits rather than absolute feature values.
-\citet{shier2025designing} extended this timbre remapping to non-differentiable synthesizers through a genetic algorithm and a nearest-neighbor lookup, and reported that the temporal morphology of a hit, namely how its loudness and spectrum evolve over time, was poorly mapped.
+For percussion, \citet{shier2024realtime} learned without labels to map onset features of acoustic snare hits to parameter changes of a differentiable TR-808-style snare synthesizer.
+\citet{shier2025designing} extended this timbre remapping to non-differentiable synthesizers and reported that the temporal morphology of a hit, namely how its loudness and spectrum evolve over time, was poorly mapped.
 In contrast, this work fits a sparse autoencoder post hoc to the shared representation of a frozen model that reconstructs a given sample, so that label-free edits reach the modal and noise components through their synthesis parameters.

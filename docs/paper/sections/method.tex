@@ -8,131 +8,94 @@ The proposed model reconstructs a percussive one-shot $x$ as the sum of three co
 \label{eq:model}
 \end{equation}
 where $S$ is a modal component, $N$ is a noise component, $T$ is a transient component, and $g$ is a gain shared by all three.
-$S$ and $N$ are rendered by fixed signal-processing synthesizers from parameters predicted by a neural network, whereas $T$ is generated directly by a small temporal convolutional network.
-The model is therefore a hybrid of parametric and neural waveform synthesis.
-All components are driven by one shared representation and are trained jointly through their sum, so that no component is trained against a target of its own.
-After training, label-free controls are obtained from a sparse autoencoder fitted to the shared representation (\sectionref{sec:method-control}).
-All audio is processed at 48~kHz, and $n$ denotes the sample index.
+$S$ and $N$ are rendered by fixed signal-processing synthesizers from parameters predicted by a neural network, whereas $T$ is generated directly by a small temporal convolutional network, so the model is a hybrid of parametric and neural waveform synthesis.
+All components are driven by one shared representation and are trained jointly through their sum.
+After training, label-free controls are obtained from a sparse autoencoder fitted to this representation.
 
 \subsection{Modal Analysis and Reference}
 \label{sec:method-analysis}
 Each sample is first analyzed into sinusoidal tracks that serve as the reference for the modal component.
-The analysis combines three observations computed with a hop of 256 samples: a constant-Q transform from 20~Hz to about 700~Hz with 24 bins per octave, and Hann-windowed short-time Fourier transforms (STFTs) of 8192 and 2048 samples.
-The three observations trade frequency resolution against time resolution in different ways, so that low modes, stable high partials, and short-lived components can each be observed with a suitable resolution.
-Spectral peaks are refined by parabolic interpolation of the log magnitude \citep{smith1987parshl}, and up to four neighboring STFT peaks are fitted jointly with complex Hann-window lobes so that overlapping peaks are not merged.
-When several observations detect the same peak, the one with the narrower nominal bandwidth is kept, and an isolated high-frequency peak takes its frequency from the long window and its amplitude and phase from the short window.
-Peaks are linked into tracks in hertz by one-to-one greedy matching that combines a bounded frequency prediction, absolute and relative frequency gates, and a soft phase cost, and a track may skip up to two frames.
-A track is kept if it is observed in at least four frames, including two consecutive frames, and in at least half of the frames within its span.
-Tracks more than 40~dB below the strongest track are discarded, and at most 128 tracks are kept.
+The analysis combines a constant-Q transform from 20~Hz to about 700~Hz with long- and short-window short-time Fourier transforms (STFTs), so that each frequency range and time scale is observed with a suitable resolution.
+Spectral peaks are refined by parabolic interpolation of the log magnitude \citep{smith1987parshl}, neighboring peaks are fitted jointly so that overlapping peaks are not merged, and peaks are linked into tracks by one-to-one matching on frequency and phase.
+Short or weak tracks are discarded, and at most 128 tracks are kept, whereas DrumBlender tracks the peaks of a constant-Q transform only and keeps 64 tracks \citep{shier2023differentiable}.
 No harmonic structure or monotonic decay is imposed, and the tracks are treated as explanatory sinusoids rather than as physical modes.
-The result is a reference parameter set $P_0=\{\nu_k[j], A_k[j], \phi_k, o_k[j]\}$ for track $k$ and analysis frame $j$, with frequency $\nu$ in cycles per sample, amplitude $A$, initial phase $\phi_k$, and observation mask $o_k[j]\in\{0,1\}$.
-For comparison, DrumBlender tracks the peaks of a constant-Q transform only and keeps 64 tracks \citep{shier2023differentiable}.
+The result is a reference parameter set $P_0=\{\nu_k[j], A_k[j], \phi_k\}$ with frequency $\nu$ in cycles per sample, amplitude $A$, and initial phase $\phi_k$ for track $k$ and analysis frame $j$.
 
-The waveform and the reference amplitudes are divided by the peak absolute value $g$ of $x$, floored at $10^{-4}$, and the summed output is multiplied by the same $g$ in \equationref{eq:model}, so that the relative levels of the components are preserved.
-In this normalized scale, the reference modal waveform $m_0$ is rendered from $P_0$ with the modal synthesizer of \sectionref{sec:method-synthesis}, and the reference residual is $r_0=x-m_0$.
-Both are computed without gradient and stay fixed for each sample.
-The residual $r_0$ serves only as an input view and is not used as a target for the noise or transient components, because the part of $x$ that the modal component leaves unexplained changes once the modal parameters are corrected.
+The waveform and the reference amplitudes are divided by the peak absolute value $g$ of $x$, so that the relative levels of the components are preserved when the output is rescaled in \equationref{eq:model}.
+The reference modal waveform $m_0$ is rendered from $P_0$, and the reference residual is $r_0=x-m_0$; both are fixed for each sample.
+The residual serves only as an input and is not a target for the noise or transient components, because the part of $x$ that the modal component leaves unexplained changes once the modal parameters are corrected.
 
 \subsection{Shared Representation}
 \label{sec:method-encoder}
-The waveform encoder receives $x$ and $r_0$ as two input channels.
-Because $[x,r_0]$ is an invertible linear transform of $[x,m_0]$, the residual channel adds no information, but it presents explicitly what the reference leaves unexplained.
-The encoder follows the dilated residual convolutional encoder of SoundStream used in DrumBlender \citep{zeghidour2022soundstream,shier2023differentiable} and is trained from scratch.
-Four downsampling stages with strides 2, 2, 4, and 8 produce one 192-dimensional frame every 128 samples (2.67~ms), and the padding of each stage aligns the frames with the centers of 128-sample blocks.
-
-The modal encoder describes each track and frame by five features: the log frequency, the log amplitude, the sine and cosine of the initial phase, and the observation flag, with all features of unobserved frames set to zero.
-A two-layer perceptron shared by all tracks maps these features to 64 channels, and two depthwise temporal convolution blocks with dilations 1 and 3 process each track along time without mixing tracks.
-The resulting per-track tokens $u_k[j]$ are kept for the modal correction.
-Because the order of the tracks carries no meaning, a context for each analysis frame is formed by attention pooling over the tokens with four learned queries, following the Set Transformer \citep{lee2019set}, and projected to 128 channels.
-This context is resampled from the analysis frames to the 128-sample frames of the waveform encoder.
-
-The waveform features and the modal context are projected, concatenated, and fused into 256 channels.
-A two-layer unidirectional gated recurrent unit (GRU) \citep{cho2014learning} with 256 units, a residual connection, and two feed-forward blocks then produce the shared representation $h\in\mathbb{R}^{F\times 256}$ over $F$ frames.
-The combination of a recurrent layer with separate parameter heads follows the DDSP decoder \citep{engel2020ddsp}.
-No skip connection bypasses $h$, so every learned audio feature reaches the synthesizers through $h$, and $h$ is the single point at which the controls act.
+A waveform encoder, which follows the convolutional encoder of SoundStream used in DrumBlender \citep{zeghidour2022soundstream,shier2023differentiable}, receives $x$ and $r_0$ as two channels and produces one frame every 128 samples (2.67~ms at 48~kHz).
+A modal encoder embeds the frequency, amplitude, and initial phase of each track and frame with a shared perceptron and processes each track along time without mixing tracks, which yields per-track tokens $u_k[j]$.
+Because the order of the tracks carries no meaning, these tokens are also summarized in each frame by attention pooling with learned queries, following the Set Transformer \citep{lee2019set}.
+The waveform features and the pooled modal context are fused and passed through a two-layer gated recurrent unit (GRU) \citep{cho2014learning} and feed-forward blocks, similar to the DDSP decoder \citep{engel2020ddsp}, to produce the shared representation $h$.
+No skip connection bypasses $h$, so every learned audio feature reaches the synthesizers through $h$, which makes $h$ the single point at which the controls act.
 
 \subsection{Synthesis Components}
 \label{sec:method-synthesis}
 \paragraph{Modal component.}
-A correction head shared by all tracks reads each token $u_k[j]$ together with $h$ resampled to the analysis frames, and predicts two values $q^{\mathrm{f}}_k[j]$ and $q^{\mathrm{a}}_k[j]$.
-They are mapped to bounded multiplicative corrections,
+A correction head shared by all tracks reads each token $u_k[j]$ together with $h$ and predicts two values $q^{\mathrm{f}}_k[j]$ and $q^{\mathrm{a}}_k[j]$, which are mapped to bounded multiplicative corrections,
 \begin{equation}
 \hat{\nu}_k[j]=\nu_k[j]\exp\!\big(0.03\tanh q^{\mathrm{f}}_k[j]\big),\qquad
-\hat{A}_k[j]=A_k[j]\exp\!\big(\log(4)\tanh q^{\mathrm{a}}_k[j]\big),
+\hat{A}_k[j]=A_k[j]\exp\!\big(\log(4)\tanh q^{\mathrm{a}}_k[j]\big).
 \label{eq:modal-correction}
 \end{equation}
-which limit the frequency correction to about $\pm 52$ cents and the amplitude correction to a factor between $1/4$ and $4$.
-The output layer of the head is initialized to zero, so that the modal component initially reproduces the reference.
-The correction keeps the analyzed tracks and the frames in which they are observed and cannot create new tracks, so energy that the analysis missed is left to the noise and transient components.
+The frequency is thus corrected by at most about $\pm 52$ cents and the amplitude by a factor between $1/4$ and $4$, and the head is initialized so that the modal component initially reproduces the reference.
 Frequency is corrected only locally because reconstruction losses are non-convex in sinusoidal frequency \citep{hayes2023sinusoidal}, which is also why DrumBlender extracts its frequencies instead of learning them \citep{shier2023differentiable}.
-The corrected parameters are interpolated linearly to audio rate, and the modal component is
+The correction cannot create new tracks, so energy that the analysis missed is left to the noise and transient components.
+With the parameters interpolated to audio rate, the modal component is
 \begin{equation}
 S[n]=\sum_{k}\hat{A}_k[n]\sin\!\Big(\phi_k+2\pi\sum_{m=0}^{n}\hat{\nu}_k[m]\Big),
 \label{eq:modal-synth}
 \end{equation}
-where the amplitude of a track is zero outside its observed frames.
-The initial phase $\phi_k$ stays at its analyzed value, and the subsequent phase follows the integral of the corrected frequency.
-The phase is accumulated in cycles in single precision, with the integer part removed after every block of 256 samples and a compensated sum carried between blocks, which keeps the accumulated phase accurate over clips of up to 20~s.
+where the initial phase $\phi_k$ stays at its analyzed value and the subsequent phase follows the corrected frequency.
 
 \paragraph{Noise component.}
-The noise component follows NoiseBandNet \citep{barahonarios2024noisebandnet} and synthesizes noise as a sum of fixed narrow bands with time-varying amplitudes,
+Following NoiseBandNet \citep{barahonarios2024noisebandnet}, the noise component is a sum of 256 fixed narrow bands with time-varying amplitudes,
 \begin{equation}
-N[n]=\sum_{b=1}^{256} a_b[n]\,\xi_b\big[(n+o_b)\bmod 65536\big],
+N[n]=\sum_{b=1}^{256} a_b[n]\,\xi_b[n+o_b],
 \label{eq:noise}
 \end{equation}
-where $\xi_b$ is a precomputed band-limited noise signal of 65,536 samples, $o_b$ is a circular offset, and $a_b$ is the amplitude of band $b$, interpolated linearly from the 128-sample frames.
-The bands are obtained with Kaiser-window FIR filters with 50~dB attenuation: 127 bands spaced linearly between 20~Hz and 6~kHz, 127 bands spaced logarithmically between 6 and 24~kHz, and one low-pass and one high-pass band.
-The filters are not trained, and each band signal is normalized to unit root-mean-square level, unlike in the original, so that $a_b$ directly sets the level of band $b$.
-During training the offsets are drawn at random for each sample and band so that the model cannot rely on a particular noise realization, whereas evaluation fixes them for each sample.
-The band amplitudes are predicted from $h$ and from the corrected modal parameters.
-The corrected parameters are encoded again by the shared track perceptron and the set pooling of the modal encoder, without the temporal blocks, and the resulting context is concatenated with $h$ and mapped by a two-layer perceptron with a softplus output to 256 non-negative amplitudes per frame.
-The noise component therefore depends on the modal correction, and its gradient also reaches the modal correction through this path.
+where $\xi_b$ is a precomputed band-limited noise signal, read circularly from an offset $o_b$ that is random during training and fixed during evaluation, and $a_b$ is the amplitude of band $b$.
+The bands are spaced linearly up to 6~kHz and logarithmically above.
+The amplitudes are predicted from $h$ together with the corrected modal parameters, which are encoded again by the modal encoder, so the noise component depends on the modal correction and its gradient also reaches that correction.
 
 \paragraph{Transient component.}
-The transient component keeps the TCN of DrumBlender, which is driven by the modal waveform \citep{shier2023differentiable}, but restricts its inputs.
-Its only audio input is the modal waveform with the gradient stopped,
+The transient component keeps the TCN of DrumBlender, which is driven by the modal waveform \citep{shier2023differentiable}, but restricts its inputs to
 \begin{equation}
 T=\mathrm{TCN}\big(\mathrm{sg}(S);\,\mathbf{s}\big),
 \label{eq:transient}
 \end{equation}
-where $\mathrm{sg}$ denotes the stop-gradient operator and $\mathbf{s}\in\mathbb{R}^{16}$ is a single conditioning vector per clip.
-The vector $\mathbf{s}$ is obtained by attention pooling of the layer-normalized $h$ over the valid frames, followed by a linear projection.
-The TCN has ten causal blocks with 16 channels, kernel size 3, and dilations from 1 to 512, which give a receptive field of 2,047 samples (42.7~ms).
-In each block, the convolution output is modulated by feature-wise linear modulation (FiLM) \citep{perez2018film} with time-invariant coefficients computed from $\mathbf{s}$, passed through a GELU, and added to a $1\times1$ residual projection.
-The FiLM layers are initialized to the identity and the output layer to zero, so that $T=0$ at the start of training.
-The TCN receives neither the time-varying representation nor the noise component, so no learned representation is decoded directly into the waveform.
-Because its input is stopped, the gradient through $T$ cannot change the modal parameters via $S$, although it still updates the shared representation through $\mathbf{s}$.
-This restriction biases the transient component toward a correction of the modal waveform, but it does not guarantee that the component contains only the attack.
+where $\mathrm{sg}$ denotes the stop-gradient operator and $\mathbf{s}$ is a single 16-dimensional vector per clip obtained by attention pooling of $h$.
+The TCN consists of ten causal dilated convolution blocks with a receptive field of about 43~ms, each modulated by feature-wise linear modulation (FiLM) \citep{perez2018film} with time-invariant coefficients computed from $\mathbf{s}$, and its output layer is initialized to zero so that $T=0$ at the start of training.
+Because the TCN receives neither the time-varying representation nor the noise component, no learned representation is decoded directly into the waveform, and because its input is stopped, $T$ cannot change the modal parameters through $S$.
+This restriction biases $T$ toward a correction of the modal waveform, but it does not guarantee that $T$ contains only the attack.
 
 \subsection{Training Objective}
 \label{sec:method-training}
-The model is trained from scratch with a single optimizer on the reconstruction of the summed output in \equationref{eq:model}, using
+The model is trained from scratch on the reconstruction of the summed output in \equationref{eq:model} with
 \begin{equation}
 \mathcal{L}=\mathcal{L}_{\mathrm{spec}}+\lambda_{\mathrm{env}}\,\mathcal{L}_{\mathrm{env}},\qquad \lambda_{\mathrm{env}}=0.1.
 \label{eq:loss}
 \end{equation}
-For each STFT size $M\in\{256,1024,4096,8192\}$ with a Hann window and a hop of $M/4$, let $X_M$ and $\hat{X}_M$ denote the magnitude spectrograms of the target and the reconstruction.
-The spectral loss is
+For STFT sizes $M\in\{256,1024,4096,8192\}$, with $X_M$ and $\hat{X}_M$ the magnitude spectrograms of the target and the reconstruction, the spectral loss is
 \begin{equation}
-\mathcal{L}_{\mathrm{spec}}=\frac{1}{4}\sum_{M}\left(\frac{\lVert \hat{X}_M-X_M\rVert_F}{\lVert X_M\rVert_F+\epsilon}+\big\langle\,\lvert\log(\hat{X}_M+\epsilon)-\log(X_M+\epsilon)\rvert\,\big\rangle\right),
+\mathcal{L}_{\mathrm{spec}}=\frac{1}{4}\sum_{M}\left(\frac{\lVert \hat{X}_M-X_M\rVert_F}{\lVert X_M\rVert_F}+\big\langle\,\lvert\log\hat{X}_M-\log X_M\rvert\,\big\rangle\right),
 \label{eq:spec-loss}
 \end{equation}
-where $\langle\cdot\rangle$ denotes the mean over time-frequency bins and $\epsilon$ is a small constant proportional to the level of the target.
-Both spectrograms are computed on the valid extent of each sample, so the padding added for batching does not enter the loss.
-The envelope loss $\mathcal{L}_{\mathrm{env}}$ is the mean absolute difference between the log root-mean-square levels of the target and the reconstruction, computed in 128-sample blocks with a hop of 64 samples, and it emphasizes onset and decay envelopes that the long tail can dominate in the spectral loss.
-The two terms of $\mathcal{L}_{\mathrm{spec}}$ are the spectral convergence and log-magnitude losses of Parallel WaveGAN \citep{yamamoto2020parallel}, which DrumBlender also uses \citep{shier2023differentiable}, and they are averaged over several STFT sizes as in the multi-scale loss of DDSP \citep{engel2020ddsp}.
-A multi-resolution STFT loss has also been combined with the mean absolute error of the root-mean-square energy to model piano notes \citep{simionato2025sines}.
-No loss term is attached to an individual component, and no phase, adversarial, or prior term is used.
-Without ground-truth components, the split of the output into $S$, $N$, and $T$ is not unique, and the structure of the model biases this split without enforcing it.
+where $\langle\cdot\rangle$ denotes the mean over time-frequency bins and both spectrograms are computed on the valid extent of each sample.
+The two terms are the spectral convergence and log-magnitude losses of Parallel WaveGAN \citep{yamamoto2020parallel}, which DrumBlender also uses \citep{shier2023differentiable}, averaged over several STFT sizes as in the multi-scale loss of DDSP \citep{engel2020ddsp}.
+The envelope loss $\mathcal{L}_{\mathrm{env}}$ is the mean absolute difference between the frame-wise log RMS levels of the target and the reconstruction, which emphasizes onset and decay envelopes that the long tail can dominate in the spectral loss; a similar RMS term has been used to model piano notes \citep{simionato2025sines}.
+No loss term is attached to an individual component, so the split of the output into $S$, $N$, and $T$ is not unique, and the structure of the model biases this split without enforcing it.
 
 \subsection{Label-Free Controls}
 \label{sec:method-control}
-After reconstruction training, the model is frozen and a sparse autoencoder (SAE) is fitted to the shared representation $h$ of the training set.
-The SAE encoder is a temporal convolution followed by a rectifier and a top-$k$ selection in each frame \citep{gao2025scaling}, which keeps the $k$ largest activations and sets the others to zero.
-The decoder is a dictionary of normalized temporal atoms, so that each feature contributes a short pattern in time rather than a single vector.
-The SAE is trained to reconstruct $h$ with a mean squared error over the valid frames.
+After reconstruction training, the model is frozen and a sparse autoencoder (SAE) with top-$k$ activation \citep{gao2025scaling} is fitted to the shared representation $h$ of the training set.
+Its encoder is a temporal convolution, and its decoder is a dictionary of normalized temporal atoms, so that each feature contributes a short pattern in time rather than a single vector.
 
-Let $\mathbf{c}=E(h)$ be the sparse code of a given sample and $D$ the decoder.
+Let $\mathbf{c}$ be the sparse code of a given sample and $D$ the decoder.
 A control scales the activation of a selected feature $i$ by $1+\alpha$, which yields the code $\mathbf{c}'$ and the edited representation
 \begin{equation}
 h' = h + D(\mathbf{c}') - D(\mathbf{c}) = h + \mathbf{d}_i * (\alpha\, c_i),
@@ -140,8 +103,6 @@ h' = h + D(\mathbf{c}') - D(\mathbf{c}) = h + \mathbf{d}_i * (\alpha\, c_i),
 \end{equation}
 where $\mathbf{d}_i$ is the atom of feature $i$ and $*$ denotes convolution over time.
 Because only the change in the decoder output is added, $\alpha=0$ returns $h$ exactly, regardless of the reconstruction error of the SAE, so every control starts from the reconstruction of the given sample.
-The top-$k$ selection is computed once on the unedited $h$ and is not repeated while $\alpha$ changes, so the set of active features does not switch during a sweep, and a feature that is inactive in a sample cannot be switched on by this edit.
-Several controls are combined by adding their changes to $h$.
-The modal corrections and the noise amplitudes are recomputed from $h'$, whereas the conditioning vector $\mathbf{s}$ of the transient component keeps its unedited value, so the transient component changes only through the edited modal waveform.
-Edits therefore reach the modal and noise synthesizers through their parameters.
+The active features are selected once on the unedited $h$, so they do not switch while $\alpha$ changes.
+The modal corrections and the noise amplitudes are recomputed from $h'$, whereas $\mathbf{s}$ keeps its unedited value, so edits reach the modal and noise synthesizers through their parameters and the transient component changes only through the edited modal waveform.
 \textbf{[TBD: how features are selected as controls.]}

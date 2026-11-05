@@ -581,8 +581,8 @@ Sample-load에서 h/u/P0를 cache하면 knob 조작에 encoder/GRU를 다시 돌
 - Adam lr1e-4,betas(0.9,0.999),eps1e-8,weight_decay0.
 - Gradient norm clip1.0, FP32/highest/FP32 wrapped-cycle phase. AMP를 암묵적으로 켜지 않는다.
 - Max150 epochs, ReduceLROnPlateau factor0.5/patience10/min_lr6.25e-6, early stopping patience20. Validation item 평균 total loss를 monitor한다.
-- 초기 per-GPU batch1. 2 GPUs, accumulation32이면 nominal effective batch64다. 긴 sample의 peak VRAM을 측정하기 전에 batch4를 보장하지 않는다.
-- Gradient accumulation은 현재 Lightning 1.9.5의 automatic optimization을 그대로 따른다. 마지막 group이 rank당 m<32개여도 loss를32로 나눈 뒤 마지막 optimizer step을 한다. 따라서 마지막 group은 완전한64-item mean update보다 m/32의 gradient 배율을 가지며, 이를 강제로64개로 맞추거나 sample을 버리지 않는다. 이 예외를 nominal effective batch와 구분해 기록한다. 현재 baseline과 같은 정책이며 학습 framework를 바꿀 때 다시 확인한다.
+- 초기 per-GPU batch1. 2 GPUs, accumulation16이면 nominal effective batch32다. 긴 sample의 peak VRAM을 측정하기 전에 batch4를 보장하지 않는다.
+- Gradient accumulation은 현재 Lightning 1.9.5의 automatic optimization을 그대로 따른다. 마지막 group이 rank당 m<16개여도 loss를16으로 나눈 뒤 마지막 optimizer step을 한다. 따라서 마지막 group은 완전한32-item mean update보다 m/16의 gradient 배율을 가지며, 이를 강제로32개로 맞추거나 sample을 버리지 않는다. 이 예외를 nominal effective batch와 구분해 기록한다. 현재 baseline과 같은 정책이며 학습 framework를 바꿀 때 다시 확인한다.
 - Whole valid clip을 사용하고 일률적인 2초 crop이나 natural tail 절단을 추가하지 않는다. 기존 dataset 상한/split membership은 이 doc에서 바꾸지 않는다.
 - DDP sampler는 entrypoint 한 곳에서 관리한다. Lightning sampler와 dataset rank 분할을 중복 적용하지 않는다. Validation은 padded distributed sampler로 모든 rank의 step 수를 같게 유지한다. Step별 collective 없이 `(sample_id, scalar_loss_terms)`를 local CPU list에 모은다. Epoch 끝에 모든 rank가 한 번 `all_gather_object`하고, ID별 중복을 제거해 전 item 평균을 계산한다. 동일 ID의 validation offset은 rank와 무관하다. 모든 rank가 같은 aggregate를 `sync_dist=False`로 기록하여 scheduler와 early stopping이 동일한 값을 본다. Local mean들의 평균을 쓰지 않는다.
 - Seed20261106. Train carrier offsets와 validation 고정 offset을 따로 관리한다.

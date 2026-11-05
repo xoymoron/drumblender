@@ -24,7 +24,7 @@ A sinusoidal component with a limited number of tracks can therefore explain onl
 
 % P3. Timbre control: fixed circuits, descriptors, and latent spaces.
 Reconstruction alone, however, does not give a sound designer a way to change a sound.
-Analog drum machines offer direct control, but only over a fixed circuit: the Roland TR-808 bass drum exposes decay, tone, and level controls on a pulse-excited resonant circuit, and its cymbal passes six square-wave oscillators through band-pass filters with only a few user-adjustable parameters \citep{werner2014physically,werner2014tr808}.
+Analog drum machines offer direct control, but only over fixed circuits, as in the Roland TR-808, whose bass drum and cymbal expose only a few user-adjustable parameters \citep{werner2014physically,werner2014tr808}.
 Neural drum synthesizers widen the timbral range by moving control into learned or descriptor-defined spaces.
 \citet{aouameur2019neural} expose a low-dimensional latent space for interactive drum generation, while \citet{ramires2020neural} and DrumGAN \citep{nistal2020drumgan} condition generation on high-level timbral descriptors such as brightness, hardness, and depth.
 These systems are designed primarily to generate new sounds from a learned distribution, and an existing sample can be edited only after it has been projected into that distribution \citep{nistal2022drumganvst}.
@@ -40,7 +40,7 @@ The controls are learned without timbre labels, so they are not restricted to a 
 The model is built on a structured decomposition into modal, noise, and transient components, which are trained jointly through their summed output.
 The modal component starts from a hybrid analysis that combines low-frequency constant-Q analysis with long- and short-window short-time Fourier analysis, and its tracks are treated as explanatory time-varying sinusoids rather than as estimates of physical eigenmodes.
 A neural network predicts bounded corrections to the frequencies and amplitudes of these tracks, together with the time-varying amplitudes of a fixed bank of noise bands, which take the corrected tracks as an additional input.
-A small temporal convolutional network adds a transient correction computed from the modal waveform and a single clip-level code, so that no learned representation is decoded directly into the waveform.
+A small temporal convolutional network adds a transient correction computed from the modal waveform.
 Because this transient path generates waveform samples, the model is a hybrid of signal-processing and neural synthesis rather than a purely parametric synthesizer.
 The controls are obtained after reconstruction training by fitting a sparse autoencoder to the shared internal representation of the frozen model, and an edit changes selected feature activations relative to those of the original recording, so that a zero edit leaves the reconstruction unchanged.
 The setting is intended for sound designers who work from existing sample libraries and want to adjust a particular sound rather than generate a new one.
