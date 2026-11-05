@@ -11,7 +11,6 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import torchaudio
-from einops import repeat
 
 from drumblender.utils.device import resolve_device
 
@@ -113,16 +112,6 @@ def select_highest_rms_channel(waveform: torch.Tensor) -> torch.Tensor:
     return waveform[channel_index : channel_index + 1, :]
 
 
-def generate_sine_wave(
-    frequency, num_samples, sample_rate, stereo: bool = False
-) -> torch.Tensor:
-    """Generate a sine wave."""
-    n = torch.arange(num_samples)
-    x = torch.sin(frequency * 2 * torch.pi * n / sample_rate)
-    x = repeat(x, "n -> c n", c=2 if stereo else 1)
-    return x
-
-
 def first_non_silent_sample(
     x: torch.Tensor,
     frame_size: int = 256,
@@ -163,28 +152,6 @@ def first_non_silent_sample_multichannel(
     ]
     valid_starts = [start for start in start_samples if start is not None]
     return min(valid_starts) if valid_starts else None
-
-
-def cut_start_silence(
-    x: torch.Tensor,
-    frame_size: int = 256,
-    hop_size: int = 256,
-    threshold_db: float = -65.0,
-) -> torch.Tensor:
-    """
-    Removes silent samples from the beginning of a waveform.
-    """
-    assert x.ndim == 2, "Expecting (channels, num_samples)"
-
-    start_sample = first_non_silent_sample_multichannel(
-        x,
-        frame_size=frame_size,
-        hop_size=hop_size,
-        threshold_db=threshold_db,
-    )
-    if start_sample is None:
-        raise ValueError(f"silent_all: below {threshold_db}dB")
-    return x[:, start_sample:]
 
 
 def cut_end_silence(

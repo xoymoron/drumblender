@@ -11,37 +11,28 @@ version = "0.0.1"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "auraloss==0.3.0",
-    "einops>=0.6,<1",
-    "jsonargparse[signatures]>=4.20,<5",
-    "lightning-utilities==0.8.0",
     "numpy==1.26.4",
-    "pandas==2.2.3",
-    "python-dotenv>=1.0,<2",
-    "pytorch-lightning==1.9.5",
     "PyYAML>=6,<7",
-    "setuptools==80.9.0",
+    "scipy>=1.10,<2",
     "soundfile>=0.12,<1",
     "torch==2.7.1",
     "torchaudio==2.7.1",
     "torchmetrics==0.11.4",
     "tqdm>=4.66,<5",
-    "wandb>=0.19,<1",
 ]
 
-[project.scripts]
-drumblender = "drumblender.cli:main"
-drumblender-synth = "drumblender.cli:inference"
-
 [project.optional-dependencies]
-dev = ["black", "ruff==0.17.3", "pytest", "pytest-mock", "pyfakefs", "pre-commit", "pytest-cov"]
-modal = ["nnAudio>=0.3,<1", "scipy>=1.10,<2"]
-modal_new = ["scipy>=1.10,<2", "matplotlib>=3.7,<4"]
+dev = ["black", "ruff==0.17.3", "pytest", "pre-commit"]
+train = ["pytorch-lightning==1.9.5", "lightning-utilities==0.8.0", "setuptools==80.9.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.ruff]
 required-version = "==0.17.3"
 target-version = "py310"
 line-length = 88
-extend-exclude = [".venv*", "logs", "insights"]
+extend-exclude = [".venv*", "logs", "pytest-of-*"]
 force-exclude = true
 unsafe-fixes = false
 
@@ -49,7 +40,3 @@ unsafe-fixes = false
 select = ["E4", "E7", "E9", "F", "B", "I"]
 # Preserve existing zip truncation semantics; strictness requires a separate audit.
 ignore = ["B905"]
-
-[tool.ruff.lint.per-file-ignores]
-# Keep the existing W&B callback module unchanged during the lint migration.
-"drumblender/callbacks.py" = ["F401", "I001"]

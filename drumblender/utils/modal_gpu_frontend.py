@@ -23,7 +23,7 @@ def cqt_coefficients(
     batch_size,
 ):
     """Evaluate the same centered CQT kernels as the SciPy path in CUDA batches."""
-    from drumblender.utils.modal_analysis_new import _window_gain
+    from drumblender.utils.modal_analysis import _window_gain
 
     spectrum = torch.fft.fft(torch.as_tensor(reduced, device=device), n=transform_size)
     positions = centers / decimation
@@ -87,7 +87,7 @@ def cqt_coefficients(
 
 def stft_blocks(audio, centers, size, frame_block_size, device):
     """Yield centered, normalized STFT blocks on CPU after CUDA transforms."""
-    from drumblender.utils.modal_analysis_new import _window_gain
+    from drumblender.utils.modal_analysis import _window_gain
 
     sample_count = len(audio)
     window_numpy = signal.windows.hann(size, sym=False).astype(np.float32)

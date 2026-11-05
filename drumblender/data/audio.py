@@ -8,11 +8,11 @@ import os
 from collections import defaultdict
 from numbers import Integral
 from pathlib import Path
-from typing import List, Literal, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torchaudio
-from torch.utils.data import Dataset, random_split
+from torch.utils.data import Dataset
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
@@ -60,166 +60,6 @@ def _split_within_sample_packs(
     return selected
 
 
-class AudioDataset(Dataset):
-    """
-    Dataset of audio files.
-
-    Args:
-        data_dir: Path to the directory containing the dataset.
-        meta_file: Name of the json metadata file.
-        sample_rate: Expected sample rate of the audio files.
-        num_samples: Expected number of samples in the audio files.
-        split (optional): Split to return. Must be one of 'train', 'val', or 'test'.
-            If None, the entire dataset is returned.
-        seed: Seed for random number generator used to split the dataset.
-    """
-
-    def __init__(
-        self,
-        data_dir: Union[str, Path],
-        meta_file: str,
-        sample_rate: int,
-        num_samples: Optional[int],
-        split: Optional[str] = None,
-        seed: int = 20261106,
-        split_strategy: Literal["sample_pack", "random"] = "sample_pack",
-        normalize: bool = False,
-        sample_types: Optional[List[str]] = None,
-        instruments: Optional[List[str]] = None,
-    ):
-        super().__init__()
-        self.data_dir = Path(data_dir)
-        self.meta_file = meta_file
-        self.sample_rate = sample_rate
-        self.num_samples = num_samples
-        self.seed = seed
-        self.normalize = normalize
-        self.sample_types = sample_types
-        self.instruments = instruments
-
-        # Confirm that preprocessed dataset exists
-        if not self.data_dir.exists():
-            raise FileNotFoundError(
-                f"Preprocessed dataset not found. Expected: {self.data_dir}"
-            )
-
-        # Load the metadata
-        with open(self.data_dir.joinpath(self.meta_file), "r") as f:
-            self.metadata = json.load(f)
-
-        self.file_list = sorted(self.metadata.keys())
-
-        # Split the dataset
-        if split is not None:
-            if split_strategy == "sample_pack":
-                self._sample_pack_split(split)
-            elif split_strategy == "random":
-                self._random_split(split)
-            else:
-                raise ValueError(
-                    "Invalid split strategy. Expected one of 'sample_pack' or 'random'."
-                )
-
-    def __len__(self):
-        return len(self.file_list)
-
-    def __getitem__(self, idx) -> Tuple[torch.Tensor]:
-        audio_filename = self.metadata[self.file_list[idx]]["filename"]
-        waveform, sample_rate = torchaudio.load(
-            str(self.data_dir.joinpath(audio_filename))
-        )
-
-        # Ensure sample rate matches configuration.
-        assert sample_rate == self.sample_rate, "Sample rate mismatch."
-
-        # Expect [channels, time] and enforce mono by taking channel 0.
-        if waveform.ndim != 2:
-            raise ValueError(f"Expected (C,T), got {waveform.shape}")
-
-        if waveform.shape[0] > 1:
-            # Mono-only policy for all training/evaluation paths.
-            waveform = waveform[:1, :]
-
-        length = waveform.shape[-1]
-
-        # Fixed-length mode: pad/truncate to num_samples.
-        if self.num_samples is not None and self.num_samples > 0:
-            if length > self.num_samples:
-                waveform = waveform[:, : self.num_samples]
-                length = self.num_samples
-            elif length < self.num_samples:
-                waveform = torch.nn.functional.pad(
-                    waveform, (0, self.num_samples - length)
-                )
-
-            # Preserve the original fixed-shape invariant.
-            assert waveform.shape == (
-                1,
-                self.num_samples,
-            ), "Incorrect input audio shape."
-        else:
-            # Variable-length mode only enforces mono-channel shape.
-            assert waveform.shape[0] == 1, "Expecting mono audio"
-
-        if self.normalize:
-            waveform = waveform / (waveform.abs().max() + 1e-9)
-
-        # Return waveform and length for collate/bucketing logic.
-        return (waveform, length)
-
-    def _sample_pack_split(
-        self, split: str, test_size: float = 0.1, val_size: float = 0.1
-    ):
-        self.file_list = _split_within_sample_packs(
-            self.metadata,
-            sorted(self.metadata),
-            split,
-            self.seed,
-            1.0 - test_size - val_size,
-            val_size,
-        )
-        for field, allowed in (
-            ("type", self.sample_types),
-            ("instrument", self.instruments),
-        ):
-            if allowed is not None:
-                self.file_list = [
-                    key
-                    for key in self.file_list
-                    if self.metadata[key].get(field) in allowed
-                ]
-        log.info("Number of samples in %s set: %d", split, len(self.file_list))
-
-    def _random_split(self, split: str):
-        """
-        Split the dataset into train, validation, and test sets.
-
-        Args:
-            split: Split to return. Must be one of 'train', 'val', or 'test'.
-        """
-        if self.sample_types is not None:
-            raise NotImplementedError(
-                "Cannot use sample types with random split. Use sample_pack split."
-            )
-
-        if split not in ["train", "val", "test"]:
-            raise ValueError("Invalid split. Must be one of 'train', 'val', or 'test'.")
-
-        splits = random_split(
-            self.file_list,
-            [0.8, 0.1, 0.1],
-            generator=torch.Generator().manual_seed(self.seed),
-        )
-
-        # Set the file list based on the split
-        if split == "train":
-            self.file_list = splits[0]
-        elif split == "val":
-            self.file_list = splits[1]
-        elif split == "test":
-            self.file_list = splits[2]
-
-
 class AudioWithParametersDataset(Dataset):
     """
     Loads (waveform, params, length).
@@ -237,7 +77,6 @@ class AudioWithParametersDataset(Dataset):
         num_samples: Optional[int],
         split: Optional[str] = None,
         seed: int = 20261106,
-        split_strategy: Literal["sample_pack", "random"] = "sample_pack",
         normalize: bool = False,
         sample_types: Optional[List[str]] = None,
         instruments: Optional[List[str]] = None,
@@ -267,7 +106,6 @@ class AudioWithParametersDataset(Dataset):
         self.num_samples = num_samples
         self.seed = seed
         self.split = split
-        self.split_strategy = split_strategy
         self.sample_types = sample_types
         self.instruments = instruments
         self.sample_pack_keys = sample_pack_keys
@@ -278,7 +116,7 @@ class AudioWithParametersDataset(Dataset):
         self.split_train_ratio = split_train_ratio
         self.split_val_ratio = split_val_ratio
         # Explicit-clock consumers carry analysis timestamps into their renderer.
-        # The legacy renderers instead map every stored frame onto audio duration.
+        # Consumers without explicit timing reject a longer analysis extent.
         self.preserve_analysis_clock = preserve_analysis_clock
 
         if not self.data_dir.exists():
@@ -295,7 +133,7 @@ class AudioWithParametersDataset(Dataset):
                 f"modal_config sample_rate {cached_sample_rate} != {self.sample_rate}"
             )
         self.modal_backend = self.modal_config.get("modal_backend")
-        if self.modal_backend not in ("original", "legacy", "hybrid", "stft", "cqt"):
+        if self.modal_backend not in ("hybrid", "stft", "cqt"):
             raise ValueError("Missing or unsupported modal_config modal_backend.")
 
         with open(self.data_dir.joinpath(self.meta_file), "r") as f:
@@ -307,16 +145,9 @@ class AudioWithParametersDataset(Dataset):
         # Split the COMPLETE metadata before filtering. Otherwise a pack-only
         # evaluation consumes a different RNG sequence and may include train IDs.
         if split is not None:
-            if split_strategy == "sample_pack":
-                self.file_list = self._split_within_pack(
-                    self.file_list, split, self.split_train_ratio, self.split_val_ratio
-                )
-            elif split_strategy == "random":
-                self.file_list = self._split_random(
-                    self.file_list, split, self.split_train_ratio, self.split_val_ratio
-                )
-            else:
-                raise ValueError("Expected split_strategy 'sample_pack' or 'random'.")
+            self.file_list = self._split_within_pack(
+                self.file_list, split, self.split_train_ratio, self.split_val_ratio
+            )
 
         # Filters select a subset of the already fixed split.
         if sample_types is not None:
@@ -384,47 +215,6 @@ class AudioWithParametersDataset(Dataset):
 
         log.info(
             "AudioWithParametersDataset split='%s' strategy='sample_pack' size=%d",
-            split,
-            len(selected),
-        )
-        return selected
-
-    def _split_random(
-        self,
-        keys: List[str],
-        split: str,
-        train_ratio: float = 0.8,
-        val_ratio: float = 0.1,
-    ) -> List[str]:
-        if split not in ("train", "val", "test"):
-            raise ValueError("Invalid split. Must be one of 'train', 'val', or 'test'.")
-        if train_ratio < 0.0 or val_ratio < 0.0 or (train_ratio + val_ratio) > 1.0:
-            raise ValueError(
-                "Invalid split ratios: require train >= 0, val >= 0, train+val <= 1."
-            )
-
-        keys = sorted(keys)
-        g = torch.Generator().manual_seed(self.seed)
-        perm = torch.randperm(len(keys), generator=g).tolist()
-        shuffled = [keys[i] for i in perm]
-
-        n = len(shuffled)
-        n_train = int(n * train_ratio)
-        n_val = int(n * val_ratio)
-        if n > 0 and n_train == 0:
-            n_train = 1
-        if n_train + n_val > n:
-            n_val = max(0, n - n_train)
-
-        if split == "train":
-            selected = shuffled[:n_train]
-        elif split == "val":
-            selected = shuffled[n_train : n_train + n_val]
-        else:
-            selected = shuffled[n_train + n_val :]
-
-        log.info(
-            "AudioWithParametersDataset split='%s' strategy='random' size=%d",
             split,
             len(selected),
         )
@@ -500,16 +290,7 @@ class AudioWithParametersDataset(Dataset):
             raise ValueError(f"{key}: modal_backend differs from modal_config.")
         expected_frames = analysis_length // self.hop_length + 1
         frames = params.shape[-1]
-        # Older CQT extraction exported ceil(L / hop) frames on its empty-mode
-        # fallback. Accept that documented zero-only exception, not arbitrary grids.
-        legacy_empty_frames = (analysis_length + self.hop_length - 1) // self.hop_length
-        legacy_empty = (
-            self.modal_backend in ("original", "legacy")
-            and frames == legacy_empty_frames
-            and params.shape[0] == 3
-            and not torch.any(params[1]).item()
-        )
-        if frames != expected_frames and not legacy_empty:
+        if frames != expected_frames:
             raise ValueError(
                 f"{key}: modal frame count={frames}, expected {expected_frames} "
                 f"from analysis_num_samples={analysis_length}, hop_length={self.hop_length}"

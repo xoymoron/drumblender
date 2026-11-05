@@ -1,0 +1,48 @@
+"""Tests for the standalone processed-dataset statistics report."""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+import soundfile as sf
+
+from scripts import report_dataset_stats
+
+
+def test_report_dataset_summarizes_processed_packs(tmp_path):
+    processed_root = tmp_path / "processed"
+    (processed_root / "pack_a").mkdir(parents=True)
+    (processed_root / "pack_b").mkdir(parents=True)
+    sf.write(
+        processed_root / "pack_a" / "kick.wav",
+        np.full(480, 0.5, dtype=np.float32),
+        480,
+    )
+    sf.write(
+        processed_root / "pack_b" / "snare.WAV",
+        np.full(240, 0.25, dtype=np.float32),
+        480,
+    )
+
+    report = report_dataset_stats.report_dataset(processed_root)
+
+    assert report["overall"]["file_count"] == 2
+    assert report["overall"]["duration_seconds"]["mean"] == pytest.approx(0.75)
+    assert report["overall"]["duration_seconds"]["median"] == pytest.approx(0.75)
+    assert report["overall"]["duration_seconds"]["min"] == pytest.approx(0.5)
+    assert report["overall"]["duration_seconds"]["max"] == pytest.approx(1.0)
+    assert report["overall"]["total_duration_seconds"] == pytest.approx(1.5)
+    assert report["overall"]["rms_dbfs"]["mean"] == pytest.approx(-9.0309, abs=1e-3)
+    assert report["overall"]["peak_dbfs"]["median"] == pytest.approx(-9.0309, abs=1e-3)
+    assert report["sample_rates"] == {"480": 2}
+    assert report["packs"]["pack_a"]["file_count"] == 1
+    assert report["packs"]["pack_a"]["total_duration_seconds"] == pytest.approx(1.0)
+    assert report["packs"]["pack_b"]["duration_seconds"]["mean"] == pytest.approx(0.5)
+
+    output_dir = tmp_path / "statistics"
+    report_dataset_stats.write_report(report, output_dir)
+    saved_report = json.loads((output_dir / "dataset_statistics.json").read_text())
+    assert saved_report["overall"]["total_duration_seconds"] == pytest.approx(1.5)
+    assert "Total duration" in (output_dir / "dataset_statistics.md").read_text()

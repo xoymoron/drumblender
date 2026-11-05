@@ -248,3 +248,8 @@ test_audio/
 
 #VSCode Workspace
 *.code-workspace
+
+# Local pytest fixtures
+pytest-of-*/
+assets/noise_bank_*.pt
+runs/

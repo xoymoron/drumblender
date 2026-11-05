@@ -1,0 +1,72 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Dataset}
+\label{sec:exp-data}
+A corpus of 17,346 percussive samples was collected from commercial and freely available sample packs.
+The corpus is highly diverse, ranging from acoustic and electronic drums to tonal percussion such as bells, marimbas, and xylophones, but every sample was selected as a one-shot that contains a single strike and a single sound event.
+Only recordings with a sample rate of at least 44.1~kHz were included.
+Samples of up to 20~s were retained, so that instruments with long tails are also covered and sounds that differ mainly in their decay can be distinguished.
+
+For stereo recordings, the channel with the larger RMS is kept as the mono signal.
+All samples are resampled to 48~kHz and trimmed of leading silence below $-65$~dB.
+Trailing silence is kept so that natural decays are preserved, and no amplitude normalization is applied.
+The clips keep their original durations, and no cropping or padding is applied to the training targets.
+
+The data are divided into training, validation, and test sets in an 80/10/10 ratio separately within each source pack, using a fixed random seed, so that every pack appears in all three subsets in proportion to its size.
+The test set contains 1,728 files.
+Because the split is stratified by pack rather than held out by pack, the results measure generalization to unseen files from known sources rather than to unseen sources.
+\textbf{[TBD: number of samples used after preprocessing and in each subset.]}
+
+\subsection{Baseline}
+\label{sec:exp-baseline}
+The baseline is DrumBlender \citep{shier2023differentiable}, retrained from scratch on the dataset above.
+Among its configurations, the all-parallel variant is used, in which the output is
+\begin{equation}
+\hat{x} = S + T(S) + N,
+\label{eq:baseline}
+\end{equation}
+where $S$ is the modal component, $T$ is a transient network applied to $S$, and $N$ is filtered noise.
+$S$ is rendered from 64 sinusoidal tracks extracted before training by peak tracking on a constant-Q transform with a minimum frequency of 20~Hz, 24 bins per octave, 240 bins, and a hop size of 256 samples, and its frame-rate frequencies and amplitudes are interpolated linearly to the audio rate.
+$N$ is white noise shaped by time-varying FIR filters, whose 128 linearly spaced band magnitudes per frame are predicted from the input waveform by a SoundStream convolutional encoder with a total stride of 128 \citep{zeghidour2022soundstream}, and the filtered frames are combined by Hann-windowed overlap-add with 256-sample windows.
+$T$ is a temporal convolutional network of eight convolutional layers with 32 channels, a kernel size of 13, and dilations doubling from 1 to 128, conditioned through feature-wise affine modulation on a 128-dimensional embedding of the input waveform from a second SoundStream encoder with attention pooling.
+The model has 2,692,833 parameters.
+
+The original implementation trains on fixed-length clips.
+To train and evaluate on complete clips of up to 20~s, the following changes are made while keeping the routing, synthesizers, and parameter shapes of the original model.
+\begin{itemize}
+  \item Each item keeps its own sample and frame lengths, and every component is computed on the valid extent of the item, so that padding does not affect its reconstruction.
+  \item Items with identical lengths are processed together, so that batch-normalization statistics are computed only over valid audio.
+  \item The MR-STFT loss is computed for each item on its valid extent and averaged with equal weight over items, instead of over a padded batch.
+  \item Batches are drawn from eight length-quantile buckets that are reshuffled every epoch.
+  \item Indexing errors in the CQT tracker that dropped frames, merged the first peaks, or mismatched phases are corrected, and the oscillator phase is accumulated in double precision to remain accurate over 20~s.
+\end{itemize}
+The reported baseline scores are therefore not a reproduction of the published results of \citet{shier2023differentiable}.
+
+\paragraph{Training.}
+The baseline is trained with Adam \citep{kingma2015adam} at a learning rate of $10^{-4}$.
+The learning rate is halved when the validation loss has not improved for 10 epochs, down to a minimum of $6.25 \times 10^{-6}$.
+Training stops when the validation loss has not improved for 20 epochs, or after 150 epochs.
+Each update accumulates gradients over eight steps with two clips on each of two GPUs, giving a nominal batch size of 32.
+All runs use the random seed 20261106.
+\textbf{[TBD: GPU type and the checkpoint used for testing.]}
+
+\subsection{Implementation Details}
+\label{sec:exp-impl}
+% Hyperparameters of the proposed model; parameter count and compute budget matched to the baseline where possible, with remaining differences disclosed.
+\textbf{[TBD: implementation details of the proposed model, and whether it uses the same training settings as the baseline.]}
+
+\subsection{Evaluation}
+\label{sec:exp-eval}
+Reconstruction is evaluated on the test set by comparing each output with its target over the valid, unpadded extent of the clip.
+All systems are scored by the same evaluation code from exported reconstruction and target waveforms.
+Three metrics are reported, for all of which lower is better.
+The multi-resolution STFT distance (MR-STFT) averages the sum of spectral convergence and log-magnitude distance over three STFT resolutions \citep{yamamoto2020parallel}, with FFT sizes of 512, 1024, and 2048, hop sizes of 50, 120, and 240, and Hann windows of 240, 600, and 1200 samples, as implemented in auraloss \citep{steinmetz2020auraloss}.
+The log-spectral distance (LSD) is the root-mean-square difference between the log power spectra of each frame, averaged over frames, with an FFT size of 8092 and a hop size of 64 samples as in the DrumBlender implementation.
+The spectral flux onset error (SF) compares onset-strength signals, each obtained by summing the squared, half-wave rectified frame-to-frame increase in STFT magnitude over frequency with an FFT size of 1024 and a hop size of 64; SF is the mean absolute difference between the two signals.
+Scores are computed per file and summarized by their mean and standard deviation over files, for the whole test set and for each source pack.
+
+% Controls (source: docs/research_implementation_goals.md, section 6): amount sweeps, return to the neutral output at zero, repeatability, small-step continuity, and application to held-out samples.
+% Controls: compare learned knobs with simple DSP edits and with PCA or random latent directions; use counterfactual sweeps to check that the encoder does not bypass the controls.
+% Neutral and edited outputs share the same noise excitation or seed.
+\textbf{[TBD: control evaluation criteria, and whether a listening test is included.]}

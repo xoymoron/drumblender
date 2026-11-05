@@ -1,0 +1,72 @@
+\documentclass[pmlr]{jmlr}
+% EAIM 2027 at AAAI -- manuscript prepared from the official template.
+% Original syntax examples: eaim-template-reference.tex and eaim-sample.pdf.
+% Compile with pdfLaTeX. Keep the template's page layout and typography.
+% amsmath, amssymb, natbib, graphicx, url, algorithm2e are loaded by jmlr.
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{siunitx}
+
+\jmlrvolume{YYY} % Assigned by the organisers upon acceptance.
+\jmlryear{2027}
+\jmlrworkshop{EAIM2027 at AAAI}
+\editors{K. Bhandari, S. Zheng, J. Shier, D. Herremans, S. Colton}
+
+% REVIEW VERSION: leave false for every anonymous submission.
+% Change to \camerareadytrue only when preparing the identified version.
+\newif\ifcameraready
+\camerareadyfalse
+
+% Working title; the short running title keeps the page header within the text width.
+\title[Sparse Timbre Control of Percussive Audio]{Sparse Timbre Control of Percussive Audio with Joint Modal, Noise, and Transient Synthesis}
+\ifcameraready
+  % First author: Minjun Kim. Corresponding author: Eunwoo Song.
+  \author{\Name{Minjun Kim} \Email{oxymoron@yonsei.ac.kr}\and
+    \Name{Eunwoo Song\nametag{\thanks{Corresponding author.}}}
+    \Email{eunwoo.song@yonsei.ac.kr}\\
+    \addr Department of Electrical and Electronic Engineering, Yonsei University}
+\else
+  % Preserve the template's two-author anonymous layout.
+  % No real names, emails, affiliation, or corresponding-author marker.
+  \author{\Name{Anonymous 1}\and
+    \Name{Anonymous 2}\\
+    \addr Anonymous affiliation}
+\fi
+
+\begin{document}
+\maketitle
+
+\input{sections/abstract}
+
+\input{sections/introduction}
+
+\input{sections/related_work}
+
+\input{sections/method}
+
+\input{sections/experiments}
+
+\input{sections/results}
+
+\input{sections/conclusion}
+
+% Add any required generative-AI disclosure accurately in Method or here.
+% Identity-revealing acknowledgements belong only in the camera-ready version:
+% \ifcameraready
+% \acks{...}
+% \fi
+
+% Keep verified BibTeX entries in eaim.bib; use \citep{key} or \citet{key}.
+\bibliography{eaim}
+
+%\appendix
+%\input{sections/appendix}
+
+% Template conventions:
+% - Figures/tables: \floatconts{label}{\caption{...}}{contents}, [htbp].
+% - References: \sectionref, \figureref, \tableref, \equationref.
+% - Use jmlr's \subfigure; avoid conflicting caption/subcaption packages.
+% - Main text: 8--11 pages excluding references (official CFP, 2026-10-29).
+% - Review PDF and public links must not reveal author identities.
+% - Do not submit source containing the camera-ready author block unless allowed.
+\end{document}

@@ -64,9 +64,10 @@ def main():
         default=None,
     )
     parser.add_argument(
-        "--modal_backend", choices=("original", "legacy", "hybrid", "stft", "cqt"),
+        "--modal_backend",
+        choices=("hybrid", "stft", "cqt"),
         default="hybrid",
-        help="original: upstream CQT tracker; legacy: ampzero-aware CQT; hybrid: NEW.",
+        help="Analysis backend; hybrid combines CQT and STFT.",
     )
     parser.add_argument("--num_modes", type=int, default=None)
     parser.add_argument("--checkpoint_every", type=int, default=100)
@@ -76,9 +77,8 @@ def main():
         "--dry_run", action="store_true", help="Print worker commands without running"
     )
     args = parser.parse_args()
-    is_new = args.modal_backend not in ("original", "legacy")
     if args.num_modes is None:
-        args.num_modes = 128 if is_new else 64
+        args.num_modes = 128
     if args.num_modes < 1 or args.checkpoint_every < 1 or args.gpu_cqt_batch_size < 1:
         parser.error(
             "Mode count, checkpoint interval, and CQT batch size must be positive"
@@ -86,9 +86,7 @@ def main():
     if args.cpu_workers < 0 or (args.cpu_workers and args.gpus is not None):
         parser.error("Use either --cpu_workers or --gpus, with a positive worker count")
     if args.cpu_workers:
-        devices = [
-            (f"CPU {index}", None, "cpu") for index in range(args.cpu_workers)
-        ]
+        devices = [(f"CPU {index}", None, "cpu") for index in range(args.cpu_workers)]
     else:
         try:
             devices = [
@@ -100,9 +98,8 @@ def main():
 
     repository = Path(__file__).resolve().parents[1]
     processed_root = (repository / args.processed_root).resolve()
-    backend_name = "new" if is_new else args.modal_backend
     requested_output = args.out_dir or Path(
-        f"../dataset/modal_features/processed_modal_{backend_name}{args.num_modes}"
+        f"../dataset/modal_features/processed_modal_new{args.num_modes}"
         f"{'_cpu' if args.cpu_workers else ''}"
     )
     out_dir = (repository / requested_output).resolve()
@@ -114,7 +111,7 @@ def main():
         command = [
             sys.executable,
             "-m",
-            "scripts.build_modal_features_new",
+            "scripts.build_modal_features",
             "--modal_backend",
             args.modal_backend,
             "--processed_root",
@@ -185,9 +182,7 @@ def main():
             ):
                 log_path = out_dir / f"shard_{shard_index}.log"
                 shard_dir = (
-                    out_dir / f"shard_{shard_index}"
-                    if len(devices) > 1
-                    else out_dir
+                    out_dir / f"shard_{shard_index}" if len(devices) > 1 else out_dir
                 )
                 shard_dir.mkdir(parents=True, exist_ok=True)
                 # Reset a previous run's live snapshot before polling it.
@@ -229,7 +224,9 @@ def main():
                         progress = json.loads(progress_path.read_text(encoding="utf-8"))
                     except (FileNotFoundError, json.JSONDecodeError):
                         progress = {}
-                    attempted = min(progress.get("attempted", 0), bars[shard_index].total)
+                    attempted = min(
+                        progress.get("attempted", 0), bars[shard_index].total
+                    )
                     bars[shard_index].update(max(0, attempted - bars[shard_index].n))
                     last = progress.get("last") or {}
                     bars[shard_index].set_postfix(

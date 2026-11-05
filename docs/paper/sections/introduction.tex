@@ -1,0 +1,56 @@
+\section{Introduction}
+\label{sec:intro}
+
+% P1. Structured analysis--synthesis and the growth of DDSP.
+Analysis--synthesis models describe a sound through a small set of interpretable signal components and resynthesize it from those components.
+Sinusoidal modeling represents a signal as a sum of partials with slowly varying amplitudes and frequencies \citep{mcaulay1986speech}, and spectral modeling synthesis (SMS) adds a stochastic residual for the energy that the partials leave unexplained \citep{serra1990spectral}.
+Differentiable digital signal processing (DDSP) carried this formulation into deep learning by implementing the synthesizer with differentiable operations, so that a neural network can be trained to predict its parameters directly from audio \citep{engel2020ddsp}.
+Since then, differentiable synthesis has moved beyond the harmonic-plus-noise synthesizer of the original work to include wavetable \citep{shan2022differentiable}, frequency modulation \citep{caspe2022ddx7}, modal resonator \citep{diaz2023rigid}, and filterbank noise \citep{barahonarios2024noisebandnet} synthesis, among others \citep{hayes2024review}.
+In this view, the choice of synthesizer acts as an inductive bias: it determines which sounds the model can reconstruct and which parameters remain available to a user.
+
+% P2. Percussive structure, the sines + noise + transient bias, and the cymbal problem.
+Percussive sounds range from pitched toms to noisy cymbals, yet most of them follow a similar course in time.
+An impulsive excitation produces a short broadband attack, after which the struck body rings out in modes that are generally not harmonically related \citep{fletcher1998physics}.
+This structure fits poorly with the harmonic-plus-noise synthesizer, and a recent review notes that extending such models to unpitched and non-harmonic instruments is challenging because of their reliance on pitch tracking \citep{hayes2024review}.
+Attack transients are also difficult for sinusoidal models in general, since a sharp broadband onset is not well described by slowly varying partials, which led to dedicated transient components in sines+transients+noise coding and transient modeling synthesis \citep{levine1998sines,verma2000extending}.
+In the differentiable setting, DDSP-SFX introduced transient modeling for impulsive sound effects \citep{liu2024ddspsfx}, and \citet{simionato2025sines} modeled piano notes with separately trained quasi-harmonic, transient, and noise sub-models.
+\citet{shier2023differentiable} brought the sines, noise, and transient decomposition to percussion with DrumBlender.
+DrumBlender extracts sinusoidal tracks by peak tracking and learns a noise component together with a temporal convolutional network (TCN) that generates the transient.
+The transient network improved onset reconstruction for membranophones, but cymbals still showed the largest spectral reconstruction errors, and the variant without the transient network performed best for idiophones \citep{shier2023differentiable}.
+The authors also noted artifacts similar to comb filtering in the decay of reconstructions with the transient network, so the better onsets came at the expense of the decay \citep{shier2023differentiable}.
+These results suggest that the main difficulty for cymbals lies in representing the decay rather than the onset.
+A cymbal benefits from hundreds or even thousands of modes, compared with a few dozen for a cowbell \citep{skare2019realtime}, and its vibration becomes nonlinear and even chaotic at large amplitudes \citep{chaigne2005nonlinear,bilbao2010percussion}.
+A sinusoidal component with a limited number of tracks can therefore explain only part of a cymbal's energy, and the noise component must absorb the remainder.
+
+% P3. Timbre control: fixed circuits, descriptors, and latent spaces.
+Reconstruction alone, however, does not give a sound designer a way to change a sound.
+Analog drum machines offer direct control, but only over a fixed circuit: the Roland TR-808 bass drum exposes decay, tone, and level controls on a pulse-excited resonant circuit, and its cymbal passes six square-wave oscillators through band-pass filters with only a few user-adjustable parameters \citep{werner2014physically,werner2014tr808}.
+Neural drum synthesizers widen the timbral range by moving control into learned or descriptor-defined spaces.
+\citet{aouameur2019neural} expose a low-dimensional latent space for interactive drum generation, while \citet{ramires2020neural} and DrumGAN \citep{nistal2020drumgan} condition generation on high-level timbral descriptors such as brightness, hardness, and depth.
+These systems are designed primarily to generate new sounds from a learned distribution, and an existing sample can be edited only after it has been projected into that distribution \citep{nistal2022drumganvst}.
+Latent-space methods offer control without timbre labels: RAVE learns a compact latent representation of audio that can be manipulated in real time \citep{caillon2021rave}, network bending inserts transformations into the computation of a trained generative model \citep{broad2022network}, and sparse autoencoders have been used to find interpretable features in audio latent spaces \citep{paek2025learning}.
+Closest to the present setting, PLAUD pairs a DDSP-style noise synthesizer with a low-dimensional variational latent space and bending operations applied within the synthesis chain \citep{kotowski2026plaud}, although it is oriented toward performance rather than toward the faithful reconstruction of a given percussive sample.
+For percussion, \citet{shier2023differentiable} left high-level control through a learned latent space as future work.
+A gap therefore remains between models that decompose a given drum sample faithfully but expose no high-level control, and models that offer control but either fix the synthesis topology or operate on generated sounds.
+
+% P4. This work.
+This paper addresses sample-anchored timbre manipulation of percussive one-shots.
+Given an existing recording, the goal is to reconstruct it faithfully and to provide controls that modify its timbre relative to that recording.
+The controls are learned without timbre labels, so they are not restricted to a predefined set of descriptors.
+The model is built on a structured decomposition into modal, noise, and transient components, which are trained jointly through their summed output.
+The modal component starts from a hybrid analysis that combines low-frequency constant-Q analysis with long- and short-window short-time Fourier analysis, and its tracks are treated as explanatory time-varying sinusoids rather than as estimates of physical eigenmodes.
+A neural network predicts bounded corrections to the frequencies and amplitudes of these tracks, together with the time-varying amplitudes of a fixed bank of noise bands, which take the corrected tracks as an additional input.
+A small temporal convolutional network adds a transient correction computed from the modal waveform and a single clip-level code, so that no learned representation is decoded directly into the waveform.
+Because this transient path generates waveform samples, the model is a hybrid of signal-processing and neural synthesis rather than a purely parametric synthesizer.
+The controls are obtained after reconstruction training by fitting a sparse autoencoder to the shared internal representation of the frozen model, and an edit changes selected feature activations relative to those of the original recording, so that a zero edit leaves the reconstruction unchanged.
+The setting is intended for sound designers who work from existing sample libraries and want to adjust a particular sound rather than generate a new one.
+
+The contributions of this paper are as follows.
+\begin{itemize}
+  \item A hybrid modal analysis front-end for variable-length percussive one-shots at 48~kHz, which provides modal tracks for sounds ranging from kicks to cymbals.
+  \item A jointly trained modal, noise, and transient synthesizer in which bounded corrections refine the analyzed modal tracks, the noise-band amplitudes are predicted from the corrected modal parameters, and the transient correction is driven by the modal waveform.
+  \item Label-free controls from a sparse autoencoder fitted post hoc to the shared representation of the reconstruction model, whose edits reach the modal and noise components through their synthesis parameters.
+  \item A variable-length evaluation protocol that excludes padded regions, compares against DrumBlender adapted to variable-length audio, and evaluates the controls by \textbf{[TBD: control evaluation criteria]}.
+\end{itemize}
+
+% \sectionref{sec:related} reviews related work, \sectionref{sec:method} describes the proposed method, \sectionref{sec:experiments} presents the experimental setup, \sectionref{sec:results} reports and discusses the results, and \sectionref{sec:conclusion} concludes the paper.

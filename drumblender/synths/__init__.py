@@ -1,10 +1,4 @@
-from drumblender.synths.modal import ModalSynth, modal_synth
-from drumblender.synths.noise import NoiseGenerator
+from drumblender.synths.modal_cycles import CyclesModalSynth, modal_synth_cycles
 from drumblender.synths.transient import TransientTCN
 
-__all__ = [
-    "modal_synth",
-    "ModalSynth",
-    "NoiseGenerator",
-    "TransientTCN",
-]
+__all__ = ["CyclesModalSynth", "TransientTCN", "modal_synth_cycles"]

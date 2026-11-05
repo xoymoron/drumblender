@@ -1,3 +1,0 @@
-class_path: drumblender.synths.NoiseGenerator
-init_args:
-  window_size: 256

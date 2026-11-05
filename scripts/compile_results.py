@@ -215,7 +215,7 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
         recon_path = bundle_dir / "recon" / src_rel
         target_path = bundle_dir / "target" / src_rel
         if not recon_path.is_file() or not target_path.is_file():
-            raise FileNotFoundError(f"Cannot rescore {src_rel}: export both recon and target (--save-target).")
+            raise FileNotFoundError(f"Cannot rescore {src_rel}: provide both recon and target WAVs.")
         recon, sr_r = _load_audio_mono(recon_path)
         target, sr_t = _load_audio_mono(target_path)
         if sr_r != sr_t or recon.shape != target.shape:

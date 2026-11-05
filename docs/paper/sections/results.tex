@@ -1,0 +1,45 @@
+\section{Results and Discussion}
+\label{sec:results}
+\subsection{Reconstruction}
+\label{sec:results-recon}
+% Table tab:reconstruction-evaluation currently lists two checkpoints (epoch036-step00015910 and epoch047-step00020640) per sample pack; state which system they belong to and which checkpoint is reported.
+% Compare with the DrumBlender baseline on the same test files, per pack.
+\textbf{[TBD: reconstruction results.]}
+\begin{table*}[t]
+\centering
+\caption{Test-set reconstruction errors by top-level sample pack. Values are per-file mean $\pm$ standard deviation; lower is better. The all row is sample-weighted.}
+\label{tab:reconstruction-evaluation}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{llrccc}
+\hline
+Run & MR-STFT $\downarrow$ & LSD $\downarrow$ & SF $\downarrow$ \\
+\hline
+DrumBlender & $1.524 \pm 0.407$ & $2.661 \pm 0.756$ & $23.407 \pm 140.719$ \\
+ % & Pack A & 61 & $1.400 \pm 0.185$ & $2.963 \pm 0.289$ & $0.336 \pm 0.709$ \\
+ % & Pack B & 6 & $1.626 \pm 0.184$ & $3.003 \pm 0.327$ & $2.665 \pm 3.173$ \\
+ % & Pack C & 1046 & $1.372 \pm 0.291$ & $2.265 \pm 0.212$ & $0.386 \pm 1.330$ \\
+ % & Pack D & 379 & $1.753 \pm 0.456$ & $3.312 \pm 0.909$ & $70.100 \pm 255.428$ \\
+ % & Pack E & 13 & $1.791 \pm 0.141$ & $2.818 \pm 0.257$ & $12.209 \pm 19.002$ \\
+ % & Pack F & 62 & $2.090 \pm 0.607$ & $3.818 \pm 1.412$ & $167.107 \pm 313.117$ \\
+ % & Pack G & 57 & $1.843 \pm 0.473$ & $3.280 \pm 0.794$ & $43.742 \pm 105.810$ \\
+ % & Pack H & 32 & $1.968 \pm 0.150$ & $3.278 \pm 0.206$ & $8.925 \pm 12.560$ \\
+ % & Pack I & 72 & $1.639 \pm 0.160$ & $2.918 \pm 0.317$ & $1.963 \pm 3.272$ \\
+\hline
+
+\end{tabular}
+\end{table*}
+
+\subsection{Controls}
+\label{sec:results-control}
+\textbf{[TBD: control results.]}
+
+\subsection{Analysis Front-End}
+\label{sec:results-analysis}
+% Optional ablation: CQT-only versus hybrid tracks under the same synthesis model.
+\textbf{[TBD: whether this ablation is run.]}
+
+\subsection{Limitations}
+\label{sec:results-limitations}
+% Candidates: within-pack split only; noncausal analysis (the 20 Hz CQT observes about 1.7 s); not a real-time plugin; tracks are explanatory sinusoids, not physical modes.
+\textbf{[TBD: limitations.]}
