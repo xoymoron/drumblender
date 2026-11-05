@@ -556,11 +556,13 @@ B=1, 20초, L=960,000, M=128, F≈3,750:
 - 모든 mode/sample의 FP32 phase 한 장 ≈468.75 MiB. 이전 FP64 한 장은937.5 MiB였다. Local cumsum, wrapped phase, interpolation 등의 추가 allocation이 있으므로 전체 peak VRAM이 절반이 된다는 뜻은 아니다.
 - 전체 256band의 sample-rate envelope 한 장 ≈937.5 MiB. 전 길이로 만들지 않는다.
 
-### 필수 memory 구현
+### Activation 보관과 checkpoint 정책
+
+현재 학습은 rank별 batch에서 clip 길이와 mode/frame 수로 activation 비용을 추산한다. `activation_budget_mib=8192` 예산에는 작은 clip부터 보관하고, 나머지 clip에는 아래 checkpoint를 적용한다. 이 예산은 peak VRAM 상한이 아니다.
 
 1. **Modal:** mode chunk16을 `checkpoint(...,use_reentrant=False)` 단위로 쓴다. 입력은 frame-rate ν/A/phi와 timing, 출력은 해당 mode의 합 waveform이다. FP32 wrapped phase와 sin을 checkpoint 안에서 재계산한다. Chunk phase 한 장은 약58.6 MiB다. Wrapped accumulator는 prefix sum의 analytical adjoint를 사용하여 Kahan recurrence graph를 저장하지 않지만, interpolation/carrier의 backward memory는 별도로 남는다. Mode chunk만으로 전체 activation이 사라지지는 않는다.
-2. **Noise:** time chunk65,536, band chunk64. Envelope 보간/carrier 곱/sum을 checkpoint 안에 둔다. 전체 L×256을 확장하지 않는다. Offset은 고정 명시 입력이며 마지막 chunk는 실 길이로 처리한다.
-3. **Transient:** 2-layer groups를 `checkpoint(...,use_reentrant=False)`로 묶는다. 경계 hidden 5개만의 산술 크기는 약 293 MiB이며 내부 activation은 재계산한다. 현재 구현은 짧은 clip을 그대로 처리하고 긴 clip에서 time-chunk checkpoint를 사용한다: chunk 65,536 samples에 최대 2,046 samples의 실제 left halo를 붙이고 출력에서 halo를 제거한다. s는 전체 clip에서 한 번 pool하여 모든 chunk가 공유한다. Clip 시작에서는 기존 causal left-zero-padding 규약을 사용한다. TFiLM/LSTM state 전달이나 stateful checkpoint API는 없다. S는 한 번 render한 결과를 detach하여 재사용하고 TCN chunk마다 modal을 다시 합성하지 않는다. 두 checkpoint 분할 방식은 목적에 맞게 선택하며 peak가 위 산술값과 같다고 주장하지 않는다.
+2. **Noise:** time chunk65,536, band chunk64. Backward는 고정 carrier와 upstream gradient에 선형 보간의 adjoint를 적용한다. Forward를 재계산하거나 전체 L×256을 보관하지 않는다. Offset은 고정 명시 입력이며 마지막 chunk는 실 길이로 처리한다.
+3. **Transient:** Activation을 보관하는 clip은 전체 길이를 한 번 처리한다. Checkpoint 대상인 긴 clip은 65,536-sample chunk와 최대 2,046-sample left halo를 사용한다. 각 chunk 출력에서 halo를 제거한다. 전체 clip에서 한 번 pool한 s와 한 번 render한 S를 모든 chunk가 공유한다. Clip 시작에서는 causal left-zero-padding을 사용한다.
 4. **Modal encoder/head:** mode chunk16에 같은 가중치를 적용한다. Pooling용 u는 보존하되 MLP/temporal의 expanded activation은 checkpoint한다. Pool attention은 4×M이며 M²가 아니다.
 5. FFT scale별 loss는 순차 계산하고 target spectrum을 forward 안에서 재사용한다. Validation은 no_grad다.
 
@@ -611,7 +613,7 @@ Sample-load에서 h/u/P0를 cache하면 knob 조작에 encoder/GRU를 다시 돌
 
 **반론:** Transient가 전부 만들면 DSP는 장식이다. Waveform loss는 noise를 죽이고 modal backward는 큰 activation memory를 사용한다.
 
-**반영:** Latent sequence에서 전체 waveform을 직접 생성하는 upsampling decoder를 제거한다. Reference frequency/amplitude correction, 분석 initial phase 고정, S 입력 detach, s16 FiLM-TCN, output zero-init을 사용한다. Loss는 최종 합의 spectral/envelope 두 항뿐이다. Mode/noise/TCN checkpoint를 명시한다. SAE 편집 중 s_ref를 고정해 T의 변화가 DSP modal 신호를 거치게 한다.
+**반영:** Latent sequence에서 전체 waveform을 직접 생성하는 upsampling decoder를 제거한다. Reference frequency/amplitude correction, 분석 initial phase 고정, S 입력 detach, s16 FiLM-TCN, output zero-init을 사용한다. Loss는 최종 합의 spectral/envelope 두 항뿐이다. Modal/TCN activation과 noise adjoint의 memory 정책을 명시한다. SAE 편집 중 s_ref를 고정해 T의 변화가 DSP modal 신호를 거치게 한다.
 
 **남는 약점:** 분해는 여전히 비동정이며 artifact 억제는 미검증이다. 분석 initial phase의 실제 onset 정확도와 T의 보완 능력도 미확인이다. Checkpoint는 계산을 늘리고 24 GiB 동작을 보장하지 않는다. Noise 중심 소리와 transient가 거의 필요 없는 소리를 허용하며 branch energy 편향만으로 실패라 하지 않는다.
 

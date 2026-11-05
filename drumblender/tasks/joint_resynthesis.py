@@ -149,9 +149,39 @@ def unique_validation_rows(shards):
     return rows
 
 
+def checkpoint_plan(batch, budget_mib):
+    """Choose which clips to checkpoint using CPU-side shape estimates."""
+    budget = budget_mib * 2**20
+    costs = [
+        # Waveform encoder/TCN, sample-rate modal, and frame-rate modal activations.
+        8192 * item["length"]
+        + 24 * item["length"] * max(1, item["mode_count"])
+        + 8192 * item["frame_length"] * max(1, item["mode_count"])
+        for item in batch
+    ]
+    checkpointed = [True] * len(batch)
+    for index in sorted(range(len(batch)), key=costs.__getitem__):
+        if costs[index] > budget:
+            break
+        checkpointed[index] = False
+        budget -= costs[index]
+    return checkpointed
+
+
 class JointResynthesisTask(pl.LightningModule):
-    def __init__(self, bank, bank_sha256, *, seed=20261106, lr=1e-4, env_weight=0.1):
+    def __init__(
+        self,
+        bank,
+        bank_sha256,
+        *,
+        seed=20261106,
+        lr=1e-4,
+        env_weight=0.1,
+        activation_budget_mib=8192,
+    ):
         super().__init__()
+        if activation_budget_mib < 0:
+            raise ValueError("activation_budget_mib must be nonnegative.")
         self.save_hyperparameters(ignore=["bank"])
         self.model = JointResynthesisModel(bank)
         self.objective = JointReconstructionLoss(env_weight)
@@ -191,10 +221,24 @@ class JointResynthesisTask(pl.LightningModule):
             logger.log_metrics({key: audio}, step=self.global_step)
         clips.clear()
 
-    def forward(self, audio, modal_params, analysis_num_samples, offsets):
-        return self.model(audio, modal_params, analysis_num_samples, offsets)
+    def forward(
+        self,
+        audio,
+        modal_params,
+        analysis_num_samples,
+        offsets,
+        *,
+        checkpoint_activations=True,
+    ):
+        return self.model(
+            audio,
+            modal_params,
+            analysis_num_samples,
+            offsets,
+            checkpoint_activations=checkpoint_activations,
+        )
 
-    def _item(self, item, training):
+    def _item(self, item, training, *, checkpoint_activations=True):
         offsets = clip_offsets(
             item["sample_id"],
             self.hparams.seed,
@@ -203,7 +247,11 @@ class JointResynthesisTask(pl.LightningModule):
         ).to(self.device)
         audio = item["audio"][None]
         result = self(
-            audio, item["params"][None], item["analysis_num_samples"], offsets
+            audio,
+            item["params"][None],
+            item["analysis_num_samples"],
+            offsets,
+            checkpoint_activations=checkpoint_activations,
         )
         target = audio / result.gain
         return result, target, torch.stack(self.objective(result.waveform, target))
@@ -211,16 +259,25 @@ class JointResynthesisTask(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         terms = []
         capture = batch_idx == 0 and self._audition_logger() is not None
-        for index, item in enumerate(batch):
-            result, _, losses = self._item(item, True)
+        plan = checkpoint_plan(batch, self.hparams.activation_budget_mib)
+        for index, (item, recompute) in enumerate(zip(batch, plan)):
+            result, _, losses = self._item(item, True, checkpoint_activations=recompute)
             terms.append(losses)
             if capture and index < 8:
                 self._capture_audition("train", item, result)
         terms = torch.stack(terms).mean(0)
         self.log(
-            "train/loss",
+            "train/loss_step",
             terms[0].detach(),
             on_step=True,
+            on_epoch=False,
+            batch_size=len(batch),
+        )
+        # Keep a global epoch average without an all-reduce on every microbatch.
+        self.log(
+            "train/loss_epoch",
+            terms[0].detach(),
+            on_step=False,
             on_epoch=True,
             sync_dist=True,
             batch_size=len(batch),

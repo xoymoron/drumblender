@@ -84,6 +84,7 @@ def main():
         seed=seed,
         lr=settings["lr"],
         env_weight=settings["env_weight"],
+        activation_budget_mib=settings.get("activation_budget_mib", 8192),
     )
     train, val = loader("train"), loader("val")
     strategy = (

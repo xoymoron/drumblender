@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from drumblender.loss import JointReconstructionLoss
+from drumblender.models import joint_resynthesis
 from drumblender.models.joint_resynthesis import JointResynthesisModel
 from drumblender.synths import noise_band
 from drumblender.synths.modal_cycles import CyclesModalSynth, _block_starts, _cuda_carry
@@ -28,9 +29,9 @@ def test_reference_identity_and_noise_only_edit():
     assert sum(p.numel() for p in model.parameters()) == 3_066_484
 
 
-def test_noise_checkpoint_matches_dense_interpolation_and_gradient(monkeypatch):
+@pytest.mark.parametrize("length", [31, 8201])
+def test_noise_adjoint_matches_dense_interpolation(monkeypatch, length):
     monkeypatch.setattr(noise_band, "TIME_CHUNK", 4096)
-    length = 8201
     bank = torch.linspace(-1, 1, 65536).expand(256, -1)
     amplitudes = torch.randn(1, (length + 127) // 128, 256, requires_grad=True)
     offsets = torch.arange(256) * 263
@@ -44,8 +45,9 @@ def test_noise_checkpoint_matches_dense_interpolation_and_gradient(monkeypatch):
     carriers = bank.gather(1, (torch.arange(length) + offsets[:, None]) % 65536)
     expected = (expected * carriers).sum(dim=1, keepdim=True)
     torch.testing.assert_close(prediction, expected, atol=2e-5, rtol=2e-5)
-    (derivative,) = torch.autograd.grad(prediction.sum(), amplitudes)
-    (expected_derivative,) = torch.autograd.grad(expected.sum(), amplitudes)
+    upstream = torch.linspace(-0.7, 1.3, length)[None, None, :]
+    (derivative,) = torch.autograd.grad(prediction, amplitudes, upstream)
+    (expected_derivative,) = torch.autograd.grad(expected, amplitudes, upstream)
     torch.testing.assert_close(derivative, expected_derivative, atol=1e-4, rtol=1e-5)
 
 
@@ -63,7 +65,8 @@ def test_silent_loss_is_mean_square_with_finite_gradient():
     )
 
 
-def test_transient_gradient_reaches_strike_but_not_modal_waveform():
+def test_transient_retained_and_checkpointed_paths_match(monkeypatch):
+    monkeypatch.setattr(joint_resynthesis, "TIME_CHUNK", 64)
     bank = torch.zeros(1, 65536).expand(256, -1)
     model = JointResynthesisModel(bank)
     # Open the zero-initialized paths to isolate the intended gradient routes.
@@ -72,10 +75,15 @@ def test_transient_gradient_reaches_strike_but_not_modal_waveform():
         model.transient.out_projection.weight.fill_(0.01)
     modal = torch.randn(1, 1, 71, requires_grad=True)
     strike = torch.randn(1, 16, requires_grad=True)
-    output = model._transient(modal, model.transient.film_coefficients(strike))
+    film = model.transient.film_coefficients(strike)
+    output = model._transient(modal, film)
+    retained = model._transient(modal, film, checkpoint_activations=False)
+    torch.testing.assert_close(output, retained)
     modal_grad, strike_grad = torch.autograd.grad(
-        output.sum(), (modal, strike), allow_unused=True
+        output.sum(), (modal, strike), allow_unused=True, retain_graph=True
     )
+    (retained_grad,) = torch.autograd.grad(retained.sum(), strike)
+    torch.testing.assert_close(strike_grad, retained_grad)
     assert modal_grad is None
     assert strike_grad.count_nonzero() > 0
 

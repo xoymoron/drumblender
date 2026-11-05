@@ -142,13 +142,14 @@ class SoundStreamEncoder(nn.Module):
             for stride in reversed(strides):
                 self.minimum_input_length = (self.minimum_input_length - 1) * stride + 2
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, checkpoint_activations=True) -> torch.Tensor:
         if x.shape[-1] < 1:
             raise ValueError("SoundStream requires nonempty audio")
         if x.shape[-1] < self.minimum_input_length:
             x = nn.functional.pad(x, (0, self.minimum_input_length - x.shape[-1]))
         recompute = (
-            torch.is_grad_enabled()
+            checkpoint_activations
+            and torch.is_grad_enabled()
             and self.checkpoint_length is not None
             and x.shape[-1] > self.checkpoint_length
         )

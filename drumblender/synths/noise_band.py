@@ -8,7 +8,6 @@ import torch
 from scipy import fft, signal
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
 
 SAMPLE_RATE = 48_000
 HOP = 128
@@ -86,6 +85,70 @@ def load_noise_bank(path: str | Path):
     return bank, hashlib.sha256(bank.contiguous().numpy()).hexdigest()
 
 
+class _NoiseBandRender(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, amplitudes, bank, offsets, length):
+        amps = amplitudes.squeeze(0).transpose(0, 1)
+        ctx.save_for_backward(bank, offsets)
+        ctx.frames = amps.shape[1]
+        ctx.chunk_size = TIME_CHUNK
+        output = []
+        for start in range(0, length, ctx.chunk_size):
+            stop = min(start + ctx.chunk_size, length)
+            samples = torch.arange(start, stop, device=amps.device)
+            first = max(0, (start - HOP // 2) // HOP)
+            last = min(amps.size(1), (stop - 1 - HOP // 2) // HOP + 2)
+            sample_start = start - first * HOP
+            chunk = 0
+            for band in range(0, BANDS, 64):
+                bands = slice(band, band + 64)
+                envelope = F.interpolate(
+                    amps[None, bands, first:last],
+                    scale_factor=HOP,
+                    mode="linear",
+                    align_corners=False,
+                )[0, :, sample_start : sample_start + samples.numel()]
+                carrier = bank[bands].gather(
+                    1, (samples + offsets[bands, None]) % BANK_LENGTH
+                )
+                chunk = chunk + (envelope * carrier).sum(0)
+            output.append(chunk)
+        return torch.cat(output)[None, None, :]
+
+    @staticmethod
+    def backward(ctx, gradient):
+        bank, offsets = ctx.saved_tensors
+        gradient = gradient.flatten()
+        relative = (torch.arange(HOP, device=gradient.device) + 0.5) / HOP - 0.5
+        own = 1 - relative.abs()
+        prev = -relative[: HOP // 2]
+        following = relative[HOP // 2 :]
+        # Halo bins collect the contributions held at the two endpoints.
+        result = gradient.new_zeros((BANDS, ctx.frames + 2))
+        for start in range(0, gradient.numel(), ctx.chunk_size):
+            stop = min(start + ctx.chunk_size, gradient.numel())
+            upstream = gradient[start:stop]
+            pad = (-upstream.numel()) % HOP
+            samples = torch.arange(start, stop + pad, device=gradient.device)
+            upstream = F.pad(upstream, (0, pad))
+            first = start // HOP
+            last = first + upstream.numel() // HOP
+            for band in range(0, BANDS, 64):
+                bands = slice(band, band + 64)
+                carrier = bank[bands].gather(
+                    1, (samples + offsets[bands, None]) % BANK_LENGTH
+                )
+                product = (carrier * upstream).reshape(64, -1, HOP)
+                result[bands, first:last] += (product[..., : HOP // 2] * prev).sum(-1)
+                result[bands, first + 1 : last + 1] += (product * own).sum(-1)
+                result[bands, first + 2 : last + 2] += (
+                    product[..., HOP // 2 :] * following
+                ).sum(-1)
+        result[:, 1] += result[:, 0]
+        result[:, -2] += result[:, -1]
+        return result[:, 1:-1].transpose(0, 1).unsqueeze(0), None, None, None
+
+
 class NoiseBandSynth(nn.Module):
     def __init__(self, bank: torch.Tensor):
         super().__init__()
@@ -93,47 +156,5 @@ class NoiseBandSynth(nn.Module):
             raise ValueError("Expected a [256,65536] FP32 carrier bank.")
         self.register_buffer("bank", bank.contiguous(), persistent=False)
 
-    @staticmethod
-    def _band_sum(env, bank, offset, samples, sample_start):
-        # At integer scale, align_corners=False puts centers at 128j + 63.5.
-        upsampled = F.interpolate(
-            env[None],
-            scale_factor=HOP,
-            mode="linear",
-            align_corners=False,
-        )[0, :, sample_start : sample_start + samples.numel()]
-        carrier = bank.gather(1, (samples + offset[:, None]) % BANK_LENGTH)
-        return (upsampled * carrier).sum(0)
-
     def forward(self, amplitudes: torch.Tensor, offsets: torch.Tensor, length: int):
-        # Slicing frame endpoints keeps the checkpoint inputs at control rate.
-        amps = amplitudes.squeeze(0).transpose(0, 1)
-        output = []
-        for start in range(0, length, TIME_CHUNK):
-            stop = min(start + TIME_CHUNK, length)
-            samples = torch.arange(start, stop, device=amps.device)
-            first = max(0, (start - HOP // 2) // HOP)
-            last = min(amps.size(1), (stop - 1 - HOP // 2) // HOP + 2)
-            sample_start = start - first * HOP
-
-            chunk = 0
-            for band in range(0, BANDS, 64):
-                bands = slice(band, band + 64)
-                inputs = (
-                    amps[bands, first:last],
-                    self.bank[bands],
-                    offsets[bands],
-                    samples,
-                    sample_start,
-                )
-                if torch.is_grad_enabled() and length > HOP * 64:
-                    chunk = chunk + checkpoint(
-                        self._band_sum,
-                        *inputs,
-                        use_reentrant=False,
-                        preserve_rng_state=False,
-                    )
-                else:
-                    chunk = chunk + self._band_sum(*inputs)
-            output.append(chunk)
-        return torch.cat(output)[None, None, :]
+        return _NoiseBandRender.apply(amplitudes, self.bank, offsets, length)

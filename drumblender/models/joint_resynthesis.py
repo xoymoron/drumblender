@@ -185,13 +185,21 @@ class JointResynthesisModel(nn.Module):
             self.pool_out(value.flatten(1)).masked_fill(empty[:, None], 0).unsqueeze(0)
         )
 
-    def _context(self, tokens, observed, audio_times, extent, native_frames):
-        pooled = _run(self._pool, tokens, observed, recompute=tokens.numel() > 2**20)
+    def _context(self, tokens, observed, audio_times, extent, native_frames, recompute):
+        pooled = _run(
+            self._pool, tokens, observed, recompute=recompute and tokens.numel() > 2**20
+        )
         position = (audio_times + 0.5) * (native_frames / extent) - 0.5
         return _sample_frames(pooled, position)
 
     def encode_reference(
-        self, audio, modal_params, analysis_num_samples, noise_offsets=None
+        self,
+        audio,
+        modal_params,
+        analysis_num_samples,
+        noise_offsets=None,
+        *,
+        checkpoint_activations=True,
     ):
         """Build a reference from one unpadded [1,1,L] clip and its native cache."""
         if audio.ndim != 3 or audio.shape[:2] != (1, 1) or audio.shape[-1] == 0:
@@ -244,7 +252,7 @@ class JointResynthesisModel(nn.Module):
                     BANDS, dtype=torch.long, device=audio.device
                 )
 
-        za = self.wave_encoder(pair)
+        za = self.wave_encoder(pair, checkpoint_activations=checkpoint_activations)
         u = torch.cat(
             [
                 _run(
@@ -252,7 +260,7 @@ class JointResynthesisModel(nn.Module):
                     params,
                     mask,
                     True,
-                    recompute=p0.shape[2] * halo > 4096,
+                    recompute=checkpoint_activations and p0.shape[2] * halo > 4096,
                 )
                 for params, mask in zip(
                     p0[..., :halo].split(MODE_CHUNK, dim=2),
@@ -262,7 +270,12 @@ class JointResynthesisModel(nn.Module):
             dim=1,
         )[..., :contributing, :]
         cm = self._context(
-            u, observed, audio_times.clamp_max(length - 1), extent, frames
+            u,
+            observed,
+            audio_times.clamp_max(length - 1),
+            extent,
+            frames,
+            checkpoint_activations,
         )
         v = self.fusion(
             torch.cat((self.audio_projection(za), self.modal_projection(cm)), dim=-1)
@@ -299,12 +312,16 @@ class JointResynthesisModel(nn.Module):
         e = (e + self.modal_ffn(e)).masked_fill(~observed[..., None], 0)
         return self.modal_out(e).tanh().masked_fill(~observed[..., None], 0)
 
-    def _refine(self, ref, h):
+    def _refine(self, ref, h, recompute):
         hm = self.modal_h(_sample_frames(h, (ref.modal_times - 63.5) / HOP))
         delta = torch.cat(
             [
                 _run(
-                    self._correction, u, hm, mask, recompute=ref.observed.numel() > 4096
+                    self._correction,
+                    u,
+                    hm,
+                    mask,
+                    recompute=recompute and ref.observed.numel() > 4096,
                 )
                 for u, mask in zip(
                     ref.u.split(MODE_CHUNK, dim=1),
@@ -323,9 +340,9 @@ class JointResynthesisModel(nn.Module):
         params = torch.cat((active, ref.p0[..., count:]), dim=-1)
         return params, torch.stack((df, da), dim=-1)
 
-    def _transient(self, modal, film):
+    def _transient(self, modal, film, *, checkpoint_activations=True):
         signal = modal.detach()
-        if signal.shape[-1] <= TIME_CHUNK:
+        if not checkpoint_activations or signal.shape[-1] <= TIME_CHUNK:
             return self.transient.forward_with_film(signal, film)
         # The exact receptive-field halo preserves convolution across chunks.
         outputs = []
@@ -336,7 +353,14 @@ class JointResynthesisModel(nn.Module):
             outputs.append(value[..., start - left :])
         return torch.cat(outputs, dim=-1)
 
-    def decode(self, reference, h_edit=None, control_scope="joint"):
+    def decode(
+        self,
+        reference,
+        h_edit=None,
+        control_scope="joint",
+        *,
+        checkpoint_activations=True,
+    ):
         """Decode normalized branches while keeping reference FiLM and offsets fixed."""
         ref = reference
         if control_scope not in ("joint", "noise"):
@@ -357,12 +381,13 @@ class JointResynthesisModel(nn.Module):
             params, delta = neutral.refined_params, neutral.log_corrections
             modal, transient = neutral.modal_waveform, neutral.transient_waveform
         else:
-            params, delta = self._refine(ref, h)
+            params, delta = self._refine(ref, h, checkpoint_activations)
             modal = self.modal_synth(
                 params,
                 ref.length,
                 ref.analysis_num_samples,
-                recompute=ref.length * params.shape[2] > 2**20,
+                recompute=checkpoint_activations
+                and ref.length * params.shape[2] > 2**20,
             )
             count = ref.observed.shape[-1]
             updated = torch.cat(
@@ -372,7 +397,8 @@ class JointResynthesisModel(nn.Module):
                         p,
                         mask,
                         False,
-                        recompute=ref.observed.numel() > 4096,
+                        recompute=checkpoint_activations
+                        and ref.observed.numel() > 4096,
                     )
                     for p, mask in zip(
                         params[..., :count].split(MODE_CHUNK, dim=2),
@@ -387,8 +413,11 @@ class JointResynthesisModel(nn.Module):
                 ref.audio_times.clamp_max(ref.length - 1),
                 ref.analysis_num_samples,
                 params.shape[-1],
+                checkpoint_activations,
             )
-            transient = self._transient(modal, ref.film_ref)
+            transient = self._transient(
+                modal, ref.film_ref, checkpoint_activations=checkpoint_activations
+            )
         envelope = self.noise_head(torch.cat((h, cm), dim=-1))
         noise = self.noise_synth(envelope, ref.noise_offsets, ref.length)
         result = SynthesisResult(
@@ -406,9 +435,22 @@ class JointResynthesisModel(nn.Module):
             ref.neutral = result, cm
         return result
 
-    def forward(self, audio, modal_params, analysis_num_samples, noise_offsets):
+    def forward(
+        self,
+        audio,
+        modal_params,
+        analysis_num_samples,
+        noise_offsets,
+        *,
+        checkpoint_activations=True,
+    ):
         return self.decode(
             self.encode_reference(
-                audio, modal_params, analysis_num_samples, noise_offsets
-            )
+                audio,
+                modal_params,
+                analysis_num_samples,
+                noise_offsets,
+                checkpoint_activations=checkpoint_activations,
+            ),
+            checkpoint_activations=checkpoint_activations,
         )

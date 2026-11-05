@@ -12,8 +12,10 @@ python -m scripts.build_noise_bank assets/noise_bank_48k.pt
 python -m scripts.train_joint_resynthesis --data-dir PATH_TO_MODAL_CACHE --noise-bank assets/noise_bank_48k.pt --output runs/joint
 ```
 
-The default config uses two CUDA devices, batch size 1 per GPU and 16
-accumulation steps. Use the [server environment](docs/environment.md) for
+The default config uses two CUDA devices, batch size 4 per GPU and 4
+accumulation steps. The activation budget of 8192 MiB per GPU is a shape-based
+estimate used to choose which clips to checkpoint. Use the
+[server environment](docs/environment.md) for
 training. The modal cache must contain `modal_config.json` and `metadata.json`.
 Use `--audio-dir` if you want to read the matching processed source WAVs.
 
