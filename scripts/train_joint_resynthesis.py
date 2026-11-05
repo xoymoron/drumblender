@@ -6,7 +6,11 @@ from pathlib import Path
 import pytorch_lightning as pl
 import torch
 import yaml
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 from pytorch_lightning.strategies import DDPStrategy
 from torch.utils.data import DataLoader
@@ -105,6 +109,7 @@ def main():
             )
         )
     callbacks = [
+        LearningRateMonitor(),
         ModelCheckpoint(
             monitor="val_loss",
             mode="min",

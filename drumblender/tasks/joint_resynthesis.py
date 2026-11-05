@@ -6,11 +6,12 @@ from math import log
 import pytorch_lightning as pl
 import torch
 import torch.distributed as dist
+from pytorch_lightning.loggers import WandbLogger
 from torch.nn import functional as F
 
 from drumblender.loss import JointReconstructionLoss
 from drumblender.models.joint_resynthesis import JointResynthesisModel
-from drumblender.synths.noise_band import BANDS, BANK_LENGTH
+from drumblender.synths.noise_band import BANDS, BANK_LENGTH, SAMPLE_RATE
 
 LOSS_NAMES = ("loss", "spec", "env")
 DIAGNOSTICS = (
@@ -155,6 +156,40 @@ class JointResynthesisTask(pl.LightningModule):
         self.model = JointResynthesisModel(bank)
         self.objective = JointReconstructionLoss(env_weight)
         self.validation_rows = []
+        self.audition = {"train": [], "val": []}
+
+    def _audition_logger(self):
+        if not self.trainer.is_global_zero or self.trainer.sanity_checking:
+            return None
+        return next(
+            (logger for logger in self.loggers if isinstance(logger, WandbLogger)),
+            None,
+        )
+
+    @torch.no_grad()
+    def _capture_audition(self, split, item, result):
+        # Use the valid waveform extent and restore the reconstruction gain.
+        self.audition[split].extend(
+            (
+                item["audio"].flatten().cpu(),
+                (result.waveform * result.gain).flatten().cpu(),
+            )
+        )
+
+    def _log_audition(self, split):
+        clips = self.audition[split]
+        if not clips:
+            return
+        logger = self._audition_logger()
+        if logger is not None:
+            from wandb import Audio
+
+            key = f"{split}/audio"
+            audio = Audio(
+                torch.cat(clips).numpy(), sample_rate=SAMPLE_RATE, caption=key
+            )
+            logger.log_metrics({key: audio}, step=self.global_step)
+        clips.clear()
 
     def forward(self, audio, modal_params, analysis_num_samples, offsets):
         return self.model(audio, modal_params, analysis_num_samples, offsets)
@@ -174,14 +209,32 @@ class JointResynthesisTask(pl.LightningModule):
         return result, target, torch.stack(self.objective(result.waveform, target))
 
     def training_step(self, batch, batch_idx):
-        terms = torch.stack([self._item(item, True)[2] for item in batch]).mean(0)
+        terms = []
+        capture = batch_idx == 0 and self._audition_logger() is not None
+        for index, item in enumerate(batch):
+            result, _, losses = self._item(item, True)
+            terms.append(losses)
+            if capture and index < 8:
+                self._capture_audition("train", item, result)
+        terms = torch.stack(terms).mean(0)
+        self.log(
+            "train/loss",
+            terms[0].detach(),
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=len(batch),
+        )
         self.log_dict(
-            dict(zip((f"train_{name}" for name in LOSS_NAMES), terms.detach())),
+            dict(zip((f"train_{name}" for name in LOSS_NAMES[1:]), terms[1:].detach())),
             on_step=True,
             on_epoch=False,
             batch_size=len(batch),
         )
         return terms[0]
+
+    def on_train_epoch_end(self):
+        self._log_audition("train")
 
     def on_validation_epoch_start(self):
         self.validation_rows.clear()
@@ -190,8 +243,11 @@ class JointResynthesisTask(pl.LightningModule):
         return self._item(item, False)
 
     def validation_step(self, batch, batch_idx):
-        for item in batch:
+        capture = batch_idx == 0 and self._audition_logger() is not None
+        for index, item in enumerate(batch):
             result, target, losses = self.evaluate_item(item)
+            if capture and index < 8:
+                self._capture_audition("val", item, result)
             diagnostics = reconstruction_diagnostics(
                 result, target, item["analysis_num_samples"]
             )
@@ -218,16 +274,22 @@ class JointResynthesisTask(pl.LightningModule):
                 values[:, len(LOSS_NAMES) :].nanmean(dim=0),
             )
         )
+        # Keep the monitor key for existing checkpoints and scheduler state.
+        self.log("val_loss", mean[0], logger=False, batch_size=len(rows))
         self.log_dict(
             {
-                f"val_{name}": value
-                for name, value in zip(LOSS_NAMES + DIAGNOSTICS, mean)
+                "validation/loss": mean[0],
+                **{
+                    f"val_{name}": value
+                    for name, value in zip(LOSS_NAMES[1:] + DIAGNOSTICS, mean[1:])
+                },
             },
             on_step=False,
             on_epoch=True,
             sync_dist=False,
             batch_size=len(rows),
         )
+        self._log_audition("val")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(

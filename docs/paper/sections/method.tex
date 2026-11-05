@@ -11,6 +11,8 @@ where $S$ is a modal component, $N$ is a noise component, $T$ is a transient com
 $S$ and $N$ are rendered by fixed signal-processing synthesizers from parameters predicted by a neural network, whereas $T$ is generated directly by a small temporal convolutional network, so the model is a hybrid of parametric and neural waveform synthesis.
 All components are driven by one shared representation and are trained jointly through their sum.
 After training, label-free controls are obtained from a sparse autoencoder fitted to this representation.
+Signals are sampled at 48~kHz, and $n$ indexes samples.
+The following subsections describe the analysis that provides the modal reference, the shared representation, the three synthesis components, the training objective, and the controls.
 
 \subsection{Modal Analysis and Reference}
 \label{sec:method-analysis}
@@ -86,7 +88,7 @@ For STFT sizes $M\in\{256,1024,4096,8192\}$, with $X_M$ and $\hat{X}_M$ the magn
 \label{eq:spec-loss}
 \end{equation}
 where $\langle\cdot\rangle$ denotes the mean over time-frequency bins and both spectrograms are computed on the valid extent of each sample.
-The two terms are the spectral convergence and log-magnitude losses of Parallel WaveGAN \citep{yamamoto2020parallel}, which DrumBlender also uses \citep{shier2023differentiable}, averaged over several STFT sizes as in the multi-scale loss of DDSP \citep{engel2020ddsp}.
+The two terms are the spectral convergence and log-magnitude losses of Parallel WaveGAN \citep{yamamoto2020parallel}, combined over several STFT sizes as in the multi-scale loss of DDSP \citep{engel2020ddsp}.
 The envelope loss $\mathcal{L}_{\mathrm{env}}$ is the mean absolute difference between the frame-wise log RMS levels of the target and the reconstruction, which emphasizes onset and decay envelopes that the long tail can dominate in the spectral loss; a similar RMS term has been used to model piano notes \citep{simionato2025sines}.
 No loss term is attached to an individual component, so the split of the output into $S$, $N$, and $T$ is not unique, and the structure of the model biases this split without enforcing it.
 

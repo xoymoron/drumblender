@@ -76,7 +76,7 @@ Open checks:
 - SF in this evaluation differentiates magnitude along time. The released DrumBlender code (`jorshidrumblender/drumblender/metrics.py`) differentiates along frequency, so these SF values are not comparable with the published DrumBlender table.
 - LSD uses n_fft = 8092 (not 8192), inherited from the DrumBlender implementation; the text states 8092.
 - No per-instrument-class results (user decision, 2026-11-05). The promise was removed from Introduction contribution 4 and the TBD from Evaluation; results are reported overall and per pack only.
-- TBD in the text: GPU type and control evaluation criteria.
+- GPU: two NVIDIA RTX 3090 (user, 2026-11-05). TBD in the text: control evaluation criteria.
 
 ## Related Work: decisions taken in the draft
 
@@ -121,3 +121,22 @@ Open checks:
 - `\bibliography{eaim}` replaced the temporary `\section*{References}` heading (done 2026-11-04).
 - Add the GenAI-use disclosure (acknowledgements or methodology).
 - Keep the camera-ready author block out of the submitted source unless allowed.
+
+## Polish pass (2026-11-05) — exemplar reading and fact fixes
+
+Exemplars read (three parallel readers): DDSP, NoiseBandNet, DDX7, Hayes 2023, the DDSP review, Diaz 2023; DrumBlender, DrumGAN, CRASH, PLAUD, Shier 2024 (Drysdale & Hockman 2024 abstract only); Paek 2025, Singh 2026, Gao 2025, RAVE, Esling 2018, network bending.
+Patterns applied: each Intro paragraph ends on the limitation the next one resolves; contributions point to sections; Related Work paragraphs end with a contrast; Method opens with notation and a one-line roadmap of its subsections.
+
+Fact fixes applied (each from the source text):
+- DDSP is trained end to end from features of the input audio (f0, loudness), not raw audio; its multi-scale loss sums (not averages) over FFT sizes, so Method now says "combined".
+- Hayes review: the difficulty with unpitched/non-harmonic instruments comes from pitch tracking and predominantly harmonic spectra.
+- DrumBlender: cymbals had the largest multi-resolution spectral (MSS) errors, not the largest on every metric; its TCN produces the transient from the sinusoidal signal.
+- RAVE: compact latent plus faster-than-real-time synthesis; the paper does not claim real-time latent manipulation.
+- Paek 2025: SAEs on the latent spaces of audio autoencoders (their SAE is ReLU+L1, not top-k).
+- Diaz 2023: predicts differentiable resonators (IIR biquads) from shape, material, and strike position.
+- Drysdale & Hockman 2024: only the abstract was readable; the sentence now says latent arithmetic, dimensionality reduction, and visualization. Read the full paper before submission if the sentence stays.
+- Gao 2025: SAEs reconstruct activations through a wide layer of sparse features (dictionary framing removed).
+- Shier 2024: "without parameter supervision" instead of "without labels".
+Not changed: Esling (accurate; ratings were reused from earlier studies), CRASH, PLAUD, DrumGAN, Singh, network bending.
+Intro P4 was reordered (task and audience first, then the three components, then the controls); the eigenmode sentence now lives only in Method.
+Compile after the pass: 0 errors, 0 warnings, 1 info (Underfull \vbox at a page break inside Method, badness 1910; cosmetic).
