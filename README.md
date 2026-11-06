@@ -19,12 +19,27 @@ estimate used to choose which clips to checkpoint. Use the
 training. The modal cache must contain `modal_config.json` and `metadata.json`.
 Use `--audio-dir` if you want to read the matching processed source WAVs.
 
-For post-hoc SAE fitting, call `model.eval().requires_grad_(False)` and extract
-`ref.h_ref[:, None]` under `torch.no_grad()`. Pass `ref.rho[:, None]` as the
-SAE loss weights. Cache the neutral sparse codes and pass them to
-`TemporalModalSAE.edit`. Decode the edited sequence with the same reference
-to reuse the strike FiLM and carrier offsets. The model returns normalized
-branches and their common `gain`.
+## Post-hoc knob audition
+
+Use the selected joint checkpoint, its original noise bank, and the matching
+modal cache and metadata. Each command writes to a new output directory.
+Pass the same `--audio-dir` and `--meta-file` to `cache` and `audition` when
+the reconstruction run used non-default paths.
+
+```sh
+python -m scripts.control_joint cache --checkpoint JOINT.ckpt --noise-bank BANK.pt --data-dir MODAL_CACHE --cache runs/control/h
+python -m scripts.control_joint train --cache runs/control/h --output runs/control/sae
+python -m scripts.control_joint audition --checkpoint JOINT.ckpt --noise-bank BANK.pt --data-dir MODAL_CACHE --cache runs/control/h --sae runs/control/sae/best.pt --output runs/control/audition
+```
+
+Open `runs/control/audition/index.html` locally and note up to two atom IDs.
+The page compares RMS-matched WAVs of three validation hits per atom at
+`-1`, `0`, and `+1`. Use `--strong` for the additional `+2` and `+4` renders.
+The default shortlist is ten candidates, subject to activation coverage.
+SAE training defaults to a 120-minute target and a 180-minute cap including
+validation. Its log reports valid frames per second and the validation MSE
+and dead-feature count. At FP32 and hop 128, the packed cache uses about
+1.29 GiB per hour of source audio before metadata and partial frames.
 
 - [Environment](docs/environment.md)
 - [Audio preprocessing](PROCESSING.md)

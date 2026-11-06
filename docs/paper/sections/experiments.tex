@@ -3,40 +3,51 @@
 
 \subsection{Dataset}
 \label{sec:exp-data}
-The dataset was collected from commercial and freely available sample packs.
-It is highly diverse, ranging from acoustic and electronic drums to tonal percussion such as bells, marimbas, and xylophones, but every sample was selected as a one-shot that contains a single strike and a single sound event.
-Only recordings with a sample rate of at least 44.1~kHz and a duration of up to 20~s were included, so that instruments with long tails are also covered.
-Stereo recordings are reduced to the channel with the larger RMS, and all samples are resampled to 48~kHz and trimmed of leading silence, while trailing silence is kept and no normalization is applied.
-After preprocessing, about 17,000 samples remain, and they are split into training, validation, and test sets in an 80/10/10 ratio within each source pack.
+The dataset combines two public percussion datasets, MDLib2.2 \citep{prockup2013toward} and the Dynamic Percussion Dataset \citep{nieminen2020dynamic}, with free and commercial sample packs, including packs from Splice.
+It covers acoustic drum kits with many kinds of cymbals and hi-hats, electronic drums from a wide range of genres, tuned and world percussion such as marimbas, vibraphones, steelpans, and bells, and a smaller share of found-object and foley hits.
+Every sample is a one-shot containing a single strike.
+In total, about 17,000 samples are used.
+Each sample pack is split into training, validation, and test sets in a ratio of 80/10/10.
 
 \subsection{Baseline}
 \label{sec:exp-baseline}
-The baseline is DrumBlender \citep{shier2023differentiable}, retrained from scratch on the same data.
-Its all-parallel variant is used, in which the output is
-\begin{equation}
-\hat{x} = S + T(S) + N,
-\label{eq:baseline}
-\end{equation}
-where $S$ is rendered from 64 sinusoidal tracks extracted by peak tracking on a constant-Q transform, $T$ is a FiLM-conditioned TCN applied to $S$, and $N$ is white noise shaped by time-varying filters whose band magnitudes are predicted by a SoundStream encoder \citep{zeghidour2022soundstream}.
-Because the original implementation trains on fixed-length clips, it was adapted to complete clips of up to 20~s without changing its routing, synthesizers, or parameter shapes.
-Every component and the loss are computed on the valid extent of each item, items of equal length are batched together so that batch normalization ignores padding, and indexing errors in the original constant-Q tracker are corrected.
-The reported baseline scores are therefore not a reproduction of the published results.
+The baseline is DrumBlender \citep{shier2023differentiable}, retrained from scratch on the same data, whose output is $\hat{x} = S + T(S) + N$.
+Here, $S$ is rendered from 64 sinusoidal tracks extracted by peak tracking on a CQT, $T$ is a TCN applied to $S$ and conditioned through FiLM on the embedding of a SoundStream encoder \citep{zeghidour2022soundstream}, and $N$ is white noise shaped by time-varying filters whose magnitudes are predicted by a second SoundStream encoder.
+The original implementation trains on fixed-length clips, so it is adapted to complete clips of up to 20~s with the zero-padded part excluded from the loss, and indexing errors in its CQT tracker are fixed, while its synthesizers, encoders, and multi-resolution STFT loss are otherwise unchanged.
 
 \subsection{Training}
 \label{sec:exp-train}
-Both systems are trained with Adam \citep{kingma2015adam} at a learning rate of $10^{-4}$, which is halved when the validation loss stops improving, and training stops early when it no longer improves, after at most 150 epochs.
-Both systems use a nominal batch size of 32, and the proposed model additionally clips the gradient norm at 1.0.
-All models are trained on two NVIDIA RTX 3090 GPUs.
+Both systems are trained with Adam \citep{kingma2015adam} at an initial learning rate of $10^{-4}$, which is halved when the validation loss stops improving, and training stops early when the validation loss no longer improves, after at most 150 epochs.
+Both systems use an effective batch size of 32 through gradient accumulation, and the proposed model additionally clips the gradient norm at 1.0.
+
+\paragraph{Post-hoc SAE training.}
+The SAE uses 512 atoms, TopK with $K=8$, and nine-frame encoder and decoder kernels, and it is trained with Adam at a learning rate of $3\times10^{-4}$ on batches of 16 crops.
+Each crop contains 256 core frames with eight context frames on each side, and the loss is evaluated on the valid core frames.
+The loss is a valid-frame-weighted mean squared error plus an AuxK term with weight $1/32$ \citep{gao2025scaling}, which fits the detached main residual with up to 128 features that have not been active in the last $10^6$ valid core frames and starts after the first such window.
+The checkpoint with the lowest validation reconstruction error is kept, the validation rate of dead features is reported separately, and SAE training is limited to three hours.
 
 \subsection{Evaluation}
 \label{sec:exp-eval}
-Reconstruction is evaluated on the test set over the valid, unpadded extent of each clip with three metrics, for all of which lower is better.
-The multi-resolution STFT distance (MR-STFT) sums spectral convergence and log-magnitude distance at three resolutions \citep{yamamoto2020parallel}, as implemented in auraloss \citep{steinmetz2020auraloss}.
+Reconstruction is evaluated on the test set over the valid, unpadded extent of each clip, and lower is better for all metrics.
+The multi-resolution STFT distance (MR-STFT) sums spectral convergence and log-magnitude distance at three resolutions \citep{yamamoto2020parallel}, as implemented in auraloss \citep{steinmetz2020auraloss}; these are the resolutions of the baseline's training loss.
 The log-spectral distance (LSD) is the root-mean-square difference between frame-wise log power spectra, computed as in the DrumBlender implementation.
-The spectral flux onset error (SF) is the mean absolute difference between the onset-strength signals of the output and the target, each obtained from the half-wave rectified increase in STFT magnitude between frames.
+To examine high-frequency content separately, the LSD is also computed with a 4096-point STFT in the bands below 250~Hz, from 250~Hz to 4~kHz, and above 4~kHz.
+The spectral flux onset error (SF) is the mean absolute difference between the onset-strength signals of the output and the target, each obtained by squaring and summing the half-wave rectified increase in STFT magnitude between frames.
 Scores are computed per file and summarized by their mean and standard deviation over the test set.
+% Also computed but not reported: log-RMS envelope error (1024-sample frames, hop 256; close to the proposed model's envelope loss) and MFCC error (40 coefficients without c0, 128 mel bands).
 
-% Controls (source: docs/research_implementation_goals.md, section 6): amount sweeps, return to the neutral output at zero, repeatability, small-step continuity, and application to held-out samples.
-% Controls: compare learned knobs with simple DSP edits and with PCA or random latent directions; use counterfactual sweeps to check that the encoder does not bypass the controls.
-% Neutral and edited outputs share the same noise excitation or seed.
-\textbf{[TBD: control evaluation criteria, and whether a listening test is included.]}
+\subsection{Control Evaluation}
+\label{sec:exp-control}
+Between 8 and 12 SAE features are shortlisted by their activation coverage across validation clips and source packs.
+Each shortlisted feature is auditioned on three active validation one-shots at $\alpha\in\{-1,0,1\}$, with the clip, reference gain, and noise offsets shared within each triplet and the listening copies level-matched.
+Up to two features are selected as knobs whose audible variations remain useful when the one-shot is played as a rhythmic hit, and features with weak responses are also auditioned at $\alpha=+2$ and $+4$, with these extrapolative edits reported separately.
+Before the test set is evaluated, the atom indices, the primary render scope, and one descriptor with its direction of change are fixed for each knob on the validation set.
+
+On held-out clips, each knob is swept over $\alpha\in\{-1,-0.5,0,0.5,1\}$ with the reference gain, and the evaluation reports the coverage of active clips, the median and interquartile range of the descriptor change, and the agreement with the validation direction, after checking that $\alpha=0$ reproduces the neutral render.
+The modal edit is examined by comparing the neutral and edited modal waveforms, alone and mixed with the reference noise and transient, including the amplitude and frequency changes of tracks with appreciable energy.
+To isolate the modal conditioning of the noise component, $h'$ and the noise offsets are held fixed while the reference and edited modal summaries are swapped, and the resulting change is reported relative to the neutral noise level.
+To isolate the clip code, the joint and joint-plus-strike renders are compared with identical modal and noise waveforms, and their transients are compared after fitting a single gain, with the remaining attack and tail differences reported.
+
+As a matched null, fixed random signed channel permutations are applied to the actual latent change, which preserves its frame-wise norm and temporal inner products, following the matched-norm comparison of \citet{singh2026discovering}.
+Time-invariant band gains are also fitted to the edited-versus-neutral log spectrum, and the remaining time-dependent change indicates how much of an edit a static equalizer cannot reproduce.
+Audio examples illustrate the knob trajectories on repeated strikes of the same sample.

@@ -1,5 +1,9 @@
 \section{Conclusion}
 \label{sec:conclusion}
-% Summarize the task, the method, and the measured findings; make no claim beyond the results.
-% Future work after the results are known.
-\textbf{[TBD: conclusion.]}
+% Drafted before the final runs; check each claim against the measured results.
+This paper presented a model for percussive one-shots that builds on DrumBlender and reconstructs a given sample as the sum of modal, noise, and transient components.
+Its modal tracks come from a hybrid CQT and STFT analysis and receive bounded corrections, its noise bands are conditioned on the corrected modal parameters, and its transient is computed from the modal waveform and a clip-level conditioning code.
+Trained on about 17,000 one-shots from public datasets and commercial sample packs, the model \textbf{[TBD: reconstruction result relative to DrumBlender]}.
+A post-hoc SAE defines sample-anchored timbre edits from the shared representation without timbre labels.
+The evaluation measures their held-out effects and isolates how modal conditioning and the transient clip code contribute to the edited sound, and \textbf{[TBD: control result]}.
+Future work includes a listening study of the controls, a causal analysis front-end for real-time use, and noise bands of different lengths that avoid repetition in long tails.

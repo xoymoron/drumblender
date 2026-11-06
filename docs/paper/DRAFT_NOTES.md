@@ -140,3 +140,27 @@ Fact fixes applied (each from the source text):
 Not changed: Esling (accurate; ratings were reused from earlier studies), CRASH, PLAUD, DrumGAN, Singh, network bending.
 Intro P4 was reordered (task and audience first, then the three components, then the controls); the eigenmode sentence now lives only in Method.
 Compile after the pass: 0 errors, 0 warnings, 1 info (Underfull \vbox at a page break inside Method, badness 1910; cosmetic).
+
+## Intro / Related Work rewrite (2026-11-05)
+- User rule: Introduction = extended abstract (flow, problem, how it is solved). Prior work in the intro is cited, not described; only foundational SMS and DDSP get a sentence of explanation. Per-paper detail lives in Related Work only, so the two sections do not repeat each other.
+- P1 starts from neural audio synthesis (user's term, kept as "NAS"), following the KSMI intro flow without copying its sentences. No "choice of synthesizer is an inductive bias" claim; no "does not use domain knowledge" or "artifacts" claims.
+- User's web edits pulled before the rewrite: "NAS" in P1, evaluation contribution item removed, roadmap comment removed. Kept as removed.
+- Related Work now has four paragraphs: differentiable and modal synthesis; sines, noise, and transients (DrumBlender detail, NoiseBandNet); neural drum synthesis and controls; label-free control of learned representations.
+- Intro P4 ends with a results TBD sentence; fill once results exist.
+
+## Intro P1/P2 swap (2026-11-05, from user outline)
+- New P1 follows the user's outline: struck solids and decay, TR-808 -> physical modeling -> signal processing -> NAS, SMS/DDSP explained, fit for membranophones/bells, tom indistinguishability (Kirby & Sandler 2021, AB test at 50% accuracy; DCT modal synthesis, not DDSP), cymbal mode count and bloom (Skare & Abel 2019: "bloom" from linear to nonlinear regimes), transient + narrow-band components hard for sines+noise.
+- New P2 = DDSP extensions (inharmonic), transient components, DrumBlender, cymbals still hardest.
+- User's web edit kept: data-driven reconstruction cite is {engel2020ddsp, zeghidour2022soundstream, kumar2023high}.
+- "signal-processing" -> "signal processing" in intro and method (user rule).
+- Citations moved directly after named terms (SMS, DDSP, DrumBlender, NoiseBandNet, RAVE, PLAUD, CRASH, StyleWaveGAN, DDSP-SFX, DDSP-Piano, SAE) in intro and related work.
+- RW cymbal-physics sentence removed (now in intro P1) to avoid duplication; bilbao2010percussion is now cited in intro P1 for physical modeling.
+
+## Future work candidate: noise-bank periodicity (2026-11-05)
+- Each of the 256 noise bands is a fixed 65,536-sample signal read circularly, so the noise fine structure repeats every ~1.37 s at 48 kHz.
+- The band gains vary over time, so the output is not a sample-exact copy; the user judged this acceptable for the paper.
+- Possible fix if repetition becomes audible in long cymbal tails: give the bands different (coprime) lengths so that their repetition points never coincide. Only the bank asset changes; the model does not need retraining.
+
+## For Results/Conclusion: component split is not unique (2026-11-05)
+- Only the sum is supervised, so the split into S, N, and T is not unique; the model structure (bounded modal corrections, restricted TCN inputs) biases the split without enforcing it.
+- Removed from Method 3.4 as redundant with "trained jointly through their sum"; mention once in Results or Conclusion (limitations).

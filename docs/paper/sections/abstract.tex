@@ -1,13 +1,12 @@
 \begin{abstract}
-% 1. Task: sample-anchored timbre manipulation of percussive one-shots, from kicks to cymbals.
-% 2. Gap: decomposition models reconstruct a given sample but expose no high-level control; controllable models generate from a learned distribution.
-% 3. Method: hybrid modal analysis, structured modal, noise, and transient synthesis, and controls learned without timbre labels.
-% 4. Results: only measured findings, after the experiments.
-% 5. Takeaway for sound designers.
-\textbf{[TBD: abstract.]}
+Percussive one-shots range from pitched drums to cymbals with dense modal content, and sound designers often want to adjust the timbre of an existing sample rather than generate a new one.
+Differentiable analysis--synthesis models such as DrumBlender reconstruct a given sample through interpretable components, but their low-level parameters offer no high-level control, and their constant-Q analysis struggles with dense high-frequency modes.
+This paper builds on DrumBlender and reconstructs a one-shot as the sum of jointly trained modal, noise, and transient components.
+Sinusoidal tracks from a hybrid constant-Q and short-time Fourier analysis receive bounded corrections, noise bands following NoiseBandNet are conditioned on the corrected modal parameters, and a small temporal convolutional network adds a transient computed from the modal waveform.
+After training, a sparse autoencoder fitted to the shared representation provides label-free controls whose edits start from the reconstruction of the given sample and act through the synthesis parameters.
+\textbf{[TBD: one or two sentences on the measured reconstruction and control results.]}
 \end{abstract}
 
-% Keyword candidates: differentiable digital signal processing; percussion synthesis; timbre manipulation; modal analysis; unsupervised control.
 \begin{keywords}
-Keywords to be determined
+differentiable digital signal processing; percussion synthesis; timbre control; modal analysis; sparse autoencoders
 \end{keywords}

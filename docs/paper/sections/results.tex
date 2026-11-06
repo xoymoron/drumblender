@@ -1,21 +1,26 @@
 \section{Results and Discussion}
 \label{sec:results}
-\subsection{Reconstruction}
-\label{sec:results-recon}
-% Table tab:reconstruction-evaluation currently lists two checkpoints (epoch036-step00015910 and epoch047-step00020640) per sample pack; state which system they belong to and which checkpoint is reported.
-% Compare with the DrumBlender baseline on the same test files, per pack.
-\textbf{[TBD: reconstruction results.]}
+% Drafted before the final runs; fill every TBD and check each claim against the measured scores.
+% Table rows: state which checkpoint (lowest validation loss) each system uses.
+\tableref{tab:reconstruction-evaluation} compares the reconstruction errors of the proposed model and DrumBlender on the test set.
+\textbf{[TBD: overall comparison with DrumBlender on MR-STFT, LSD, and SF, noting that MR-STFT uses the resolutions of DrumBlender's training loss.]}
+\textbf{[TBD: band-wise LSD, in particular above 4~kHz, and its relation to the hybrid analysis.]}
+\textbf{[TBD: differences across instrument classes, such as cymbals versus kicks and toms.]}
+\textbf{[TBD: size of the modal corrections and energy of the transient component outside the attack.]}
+
 \begin{table*}[t]
 \centering
-\caption{Test-set reconstruction errors. Values are per-file mean $\pm$ standard deviation.}
+\caption{Test-set reconstruction errors (per-file mean $\pm$ standard deviation; lower is better). The band columns give the LSD below 250~Hz, from 250~Hz to 4~kHz, and above 4~kHz.}
 \label{tab:reconstruction-evaluation}
 \footnotesize
 \setlength{\tabcolsep}{4pt}
-\begin{tabular}{llrccc}
+\begin{tabular}{lcccccc}
 \hline
-Run & MR-STFT $\downarrow$ & LSD $\downarrow$ & SF $\downarrow$ \\
+Model & MR-STFT & LSD & LSD$_{\mathrm{low}}$ & LSD$_{\mathrm{mid}}$ & LSD$_{\mathrm{high}}$ & SF \\
 \hline
-DrumBlender & $1.524 \pm 0.407$ & $2.661 \pm 0.756$ & $23.407 \pm 140.719$ \\
+DrumBlender & $1.524 \pm 0.407$ & $2.661 \pm 0.756$ & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & $23.407 \pm 140.719$ \\
+Proposed & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} & \textbf{[TBD]} \\
+ % Per-pack DrumBlender rows (Pack, files, MR-STFT, LSD, SF):
  % & Pack A & 61 & $1.400 \pm 0.185$ & $2.963 \pm 0.289$ & $0.336 \pm 0.709$ \\
  % & Pack B & 6 & $1.626 \pm 0.184$ & $3.003 \pm 0.327$ & $2.665 \pm 3.173$ \\
  % & Pack C & 1046 & $1.372 \pm 0.291$ & $2.265 \pm 0.212$ & $0.386 \pm 1.330$ \\
@@ -26,20 +31,16 @@ DrumBlender & $1.524 \pm 0.407$ & $2.661 \pm 0.756$ & $23.407 \pm 140.719$ \\
  % & Pack H & 32 & $1.968 \pm 0.150$ & $3.278 \pm 0.206$ & $8.925 \pm 12.560$ \\
  % & Pack I & 72 & $1.639 \pm 0.160$ & $2.918 \pm 0.317$ & $1.963 \pm 3.272$ \\
 \hline
-
 \end{tabular}
 \end{table*}
 
-\subsection{Controls}
-\label{sec:results-control}
-\textbf{[TBD: control results.]}
+\paragraph{Timbre controls.}
+\textbf{[TBD: held-out knob sweeps, direct modal edits, and modal-to-noise intervention.]}
+% Report the selected features, held-out coverage, directional agreement, and effect sizes against the matched permutations. Show modal amplitude and frequency changes and whether they remain audible in the fixed-branch mix. Report the static spectral residual and the measured modal-conditioned noise difference. Present extrapolative edits separately and include the strike A/B with the audio examples when informative.
 
-\subsection{Analysis Front-End}
-\label{sec:results-analysis}
-% Optional ablation: CQT-only versus hybrid tracks under the same synthesis model.
-\textbf{[TBD: whether this ablation is run.]}
-
-\subsection{Limitations}
-\label{sec:results-limitations}
-% Candidates: within-pack split only; noncausal analysis (the 20 Hz CQT observes about 1.7 s); not a real-time plugin; tracks are explanatory sinusoids, not physical modes.
-\textbf{[TBD: limitations.]}
+Several limitations remain.
+Because only the summed output is supervised, the split into $S$, $N$, and $T$ is not unique, and the model structure biases this split without enforcing it.
+The data are split within each source pack, so the results measure generalization to unseen samples from known sources rather than to unseen sources.
+The analysis is non-causal, as the lowest CQT bins observe about 1.7~s of audio, so the system edits recorded samples offline rather than running as a real-time instrument.
+The control evaluation combines descriptor measurements with illustrative audio examples.
+A formal listening study would be needed to establish perceptual consistency and usefulness in performance.
