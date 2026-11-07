@@ -93,15 +93,16 @@ def weighted_error(error, weights):
     return (error.square() * weights[..., None]).sum()
 
 
-def training_loss(sae, hidden, weights, last_seen, frame_count, frame_total):
+def training_loss(
+    sae, hidden, weights, last_seen, frame_count, frame_total, *, return_core=False
+):
     mask = weights > 0
     pre = sae.preactivations(hidden, mask)
     codes, indices, values = sae.select(pre, mask, sae.top_k)
     atoms = sae.atoms()
     core_weights = weights[:, CORE_SLICE]
-    residual = (
-        hidden[:, CORE_SLICE] - sae.render_codes(codes, atoms=atoms)[:, CORE_SLICE]
-    )
+    core = sae.render_codes(codes, atoms=atoms)[:, CORE_SLICE]
+    residual = hidden[:, CORE_SLICE] - core
     error = weighted_error(residual, core_weights)
 
     # Track the exact last activation on the valid core, never on repeated halo.
@@ -124,4 +125,5 @@ def training_loss(sae, hidden, weights, last_seen, frame_count, frame_total):
             error = (
                 error + weighted_error(residual.detach() - estimate, core_weights) / 32
             )
-    return error / (core_weights.sum() * CHANNELS)
+    loss = error / (core_weights.sum() * CHANNELS)
+    return (loss, core) if return_core else loss

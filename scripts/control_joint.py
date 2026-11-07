@@ -221,6 +221,8 @@ def save_best(path, state):
 
 
 def train_sae(args):
+    from drumblender.control_protocol import WARMUP_KIND
+
     manifest = open_cache(args.cache)
     train, val = (
         FrameCache(args.cache, s, manifest["splits"][s]) for s in ("train", "val")
@@ -281,10 +283,38 @@ def train_sae(args):
             best = score
             save_best(
                 ckpt,
-                {"state_dict": sae.state_dict(), "cache_sha256": identity, **entry},
+                {
+                    "state_dict": sae.state_dict(),
+                    "cache_sha256": identity,
+                    "identity": manifest["identity"],
+                    "seed": manifest["seed"],
+                    "kind": WARMUP_KIND,
+                    **entry,
+                },
             )
     if not ckpt.is_file():
         raise RuntimeError("The time cap expired before a complete validation pass.")
+    # Budget the entire invocation, not the time of the best validation epoch.
+    artifact = torch.load(ckpt, map_location="cpu", weights_only=True)
+    artifact.update(
+        warmup_seconds=time.monotonic() - start,
+        warmup_total_steps=step,
+        loss="L_h + L_AuxK / 32",
+        initialization="random",
+        optimizer="Adam",
+        learning_rate=3e-4,
+    )
+    save_best(ckpt, artifact)
+    write_json(
+        args.output / "timing.json",
+        {
+            "warmup_seconds": artifact["warmup_seconds"],
+            "target_minutes": args.minutes,
+            "max_minutes": args.max_minutes,
+            "selected_step": artifact["step"],
+            "total_steps": step,
+        },
+    )
     print(f"Best checkpoint: {ckpt}")
 
 
@@ -510,8 +540,8 @@ def main():
         sub.add_argument("--meta-file", default="metadata.json")
     cache.add_argument("--workers", type=int, default=2)
     train.add_argument("--output", type=Path, required=True)
-    train.add_argument("--minutes", type=float, default=120)
-    train.add_argument("--max-minutes", type=float, default=180)
+    train.add_argument("--minutes", type=float, default=25)
+    train.add_argument("--max-minutes", type=float, default=30)
     render.add_argument("--output", type=Path, required=True)
     render.add_argument("--sae", type=Path, required=True)
     render.add_argument("--candidates", type=int, choices=range(8, 13), default=10)
