@@ -18,8 +18,9 @@ from scripts import compile_results
 
 
 @pytest.mark.parametrize("multiple_models", [False, True])
+@pytest.mark.parametrize("sinusoidal", [False, True])
 def test_default_table_includes_all_metrics_and_keeps_pack_statistics(
-    tmp_path, multiple_models
+    tmp_path, multiple_models, sinusoidal
 ):
     bundle = tmp_path / "example_model"
     evaluation = bundle / "evaluation"
@@ -28,10 +29,10 @@ def test_default_table_includes_all_metrics_and_keeps_pack_statistics(
     config = bundle / "configs" / "evaluation_metrics.yaml"
     shutil.copyfile(DEFAULT_METRICS_CONFIG, config)
     metrics, config_sha256 = load_evaluation_metrics(config)
-    loss_rows, metric_rows = [], []
+    loss_rows, metric_rows, sinusoidal_rows = [], [], []
     for pack, score in (("PackA", 1.23456), ("PackB", 2.23456)):
         relative = f"{pack}/hit.wav"
-        for kind in ("target", "recon"):
+        for kind in (("target", "recon", "sinusoidal") if sinusoidal else ("target", "recon")):
             path = bundle / kind / relative
             path.parent.mkdir(parents=True)
             sf.write(path, np.full(2048, 0.1, dtype=np.float32), 48000, subtype="FLOAT")
@@ -47,10 +48,20 @@ def test_default_table_includes_all_metrics_and_keeps_pack_statistics(
             "metric_config_sha256": config_sha256,
             "audio_sha256": audio_pair_fingerprint(bundle, relative),
         })
-    for name, rows in (
+        if sinusoidal:
+            sinusoidal_rows.append({
+                **source,
+                **dict.fromkeys(evaluation_score_keys(metrics), score + 2),
+                "metric_config_sha256": config_sha256,
+                "audio_sha256": audio_pair_fingerprint(bundle, relative, "sinusoidal"),
+            })
+    reports = [
         ("per_file_loss.csv", loss_rows),
         ("per_file_metrics.csv", metric_rows),
-    ):
+    ]
+    if sinusoidal:
+        reports.append(("per_file_sinusoidal_metrics.csv", sinusoidal_rows))
+    for name, rows in reports:
         with (evaluation / name).open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(file, fieldnames=list(rows[0]))
             writer.writeheader()
@@ -81,10 +92,17 @@ def test_default_table_includes_all_metrics_and_keeps_pack_statistics(
         in text
     )
     assert text.count("1.73 ± 0.50") == (14 if multiple_models else 7)
+    if sinusoidal:
+        assert text.count("3.73 ± 0.50") == (14 if multiple_models else 7)
+        lines = [line for line in tex.splitlines() if line.endswith(r"\\")]
+        model_index = lines.index(model_line)
+        assert lines[model_index + 1].startswith("Sinusoidal &")
+        assert lines[model_index + 1].count(r"$3.73 \pm 0.50$") == 7
+        assert (evaluation / "statistics_sinusoidal.csv").is_file()
 
     with (report / "summary_table.csv").open(encoding="utf-8", newline="") as file:
         rows = list(csv.DictReader(file))
-    assert len(rows) == (6 if multiple_models else 3)
+    assert len(rows) == (6 if multiple_models else 3) * (2 if sinusoidal else 1)
     assert {row["pack"] for row in rows} == {"all", "PackA", "PackB"}
     overall = next(row for row in rows if row["pack"] == "all")
     for _, prefix, _ in compile_results.TABLE_METRICS:
@@ -92,3 +110,22 @@ def test_default_table_includes_all_metrics_and_keeps_pack_statistics(
         assert float(overall[f"{prefix}_std"]) == pytest.approx(0.5)
     summary = json.loads((evaluation / "summary.json").read_text(encoding="utf-8"))
     assert summary["metrics"]["test/mfcc"] == pytest.approx(1.73456)
+    if sinusoidal:
+        assert summary["sinusoidal_metrics"]["test/mfcc"] == pytest.approx(3.73456)
+        with (evaluation / "per_file_sinusoidal_metrics.csv").open(
+            encoding="utf-8", newline=""
+        ) as file:
+            cached = list(csv.DictReader(file))
+        with (evaluation / "per_file_loss.csv").open(
+            encoding="utf-8", newline=""
+        ) as file:
+            sources = list(csv.DictReader(file))
+        assert compile_results._cache_matches(
+            bundle, cached, sources, metrics, config_sha256, "sinusoidal"
+        )
+        (bundle / "sinusoidal" / "PackA" / "hit.wav").unlink()
+        assert not compile_results._cache_matches(
+            bundle, cached, sources, metrics, config_sha256, "sinusoidal"
+        )
+        with pytest.raises(FileNotFoundError, match="sinusoidal"):
+            compile_results.main([str(bundle), "--device", "cpu"])

@@ -209,17 +209,19 @@ def _sample_name(row: Dict[str, object]) -> str:
     return f"row_{row.get('__row_idx__', 'unknown')}"
 
 
-def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
+def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256, prediction_dir="recon"):
     """Rescore paired WAVs and refresh the per-file cache for this bundle."""
     metric_rows = []
     device = next(metrics.buffers()).device
     for source in loss_rows:
         src_rel = str(source.get("source_filename", "")).replace("\\", "/")
-        fingerprint = audio_pair_fingerprint(bundle_dir, src_rel)
-        recon_path = bundle_dir / "recon" / src_rel
+        fingerprint = audio_pair_fingerprint(bundle_dir, src_rel, prediction_dir)
+        recon_path = bundle_dir / prediction_dir / src_rel
         target_path = bundle_dir / "target" / src_rel
         if not recon_path.is_file() or not target_path.is_file():
-            raise FileNotFoundError(f"Cannot rescore {src_rel}: provide both recon and target WAVs.")
+            raise FileNotFoundError(
+                f"Cannot rescore {src_rel}: provide both {prediction_dir} and target WAVs."
+            )
         recon, sr_r = _load_audio_mono(recon_path)
         target, sr_t = _load_audio_mono(target_path)
         if sr_r != sr_t or recon.shape != target.shape:
@@ -239,7 +241,8 @@ def _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256):
         metric_rows.append(row)
     if not metric_rows:
         raise ValueError(f"Empty evaluation: {bundle_dir}")
-    _write_csv(bundle_dir / "evaluation" / "per_file_metrics.csv", metric_rows, list(metric_rows[0]))
+    suffix = "" if prediction_dir == "recon" else "_sinusoidal"
+    _write_csv(bundle_dir / "evaluation" / f"per_file{suffix}_metrics.csv", metric_rows, list(metric_rows[0]))
     return metric_rows
 
 
@@ -251,7 +254,7 @@ def _row_pack(row):
     return str(row.get("sample_pack_key") or "__root__").replace("\\", "/").split("/", 1)[0]
 
 
-def _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
+def _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256, prediction_dir="recon"):
     """Reuse scores only when sample order, metric setup, and both WAVs still match."""
     if not rows or len(rows) != len(loss_rows):
         return False
@@ -271,24 +274,34 @@ def _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
         if any(not _is_finite(_to_float(row.get(key))) for key in required_scores):
             return False
         if row.get("audio_sha256") != audio_pair_fingerprint(
-            bundle_dir, source["source_filename"]
+            bundle_dir, source["source_filename"], prediction_dir
         ):
             return False
     return True
 
 
-def _load_or_compute_metric_rows(bundle_dir: Path, metrics, config_sha256, recompute=False):
+def _load_or_compute_metric_rows(
+    bundle_dir: Path, metrics, config_sha256, recompute=False, prediction_dir="recon"
+):
     """Load a valid cache or rescore the paired audio when it is stale or forced."""
     loss_csv = bundle_dir / "evaluation" / "per_file_loss.csv"
     if not loss_csv.is_file():
         raise FileNotFoundError(f"Missing per_file_loss.csv: {loss_csv}")
     loss_rows = _read_csv(loss_csv)
-    cache = bundle_dir / "evaluation" / "per_file_metrics.csv"
+    if prediction_dir == "sinusoidal":
+        # Training losses and cached model scores belong to the full reconstruction.
+        loss_rows = [
+            {key: value for key, value in row.items()
+             if not key.startswith("test/") and key not in ("loss", "spec", "env")}
+            for row in loss_rows
+        ]
+    suffix = "" if prediction_dir == "recon" else "_sinusoidal"
+    cache = bundle_dir / "evaluation" / f"per_file{suffix}_metrics.csv"
     if cache.is_file() and not recompute:
         rows = _read_csv(cache)
-        if _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256):
+        if _cache_matches(bundle_dir, rows, loss_rows, metrics, config_sha256, prediction_dir):
             return rows
-    return _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256)
+    return _compute_metric_rows(bundle_dir, loss_rows, metrics, config_sha256, prediction_dir)
 
 
 def _pack_label(summary: Dict[str, Any]) -> str:
@@ -322,7 +335,7 @@ def _summary_row(
 def _summary_markdown(summary_rows: List[Dict[str, object]]) -> str:
     """Render one mean and population SD cell per metric and model."""
     rows = [
-        [row["bundle"]] + [
+        [row.get("model", row["bundle"])] + [
             f"{_fmt_float(_to_float(row[f'{prefix}_mean']), 2)} ± "
             f"{_fmt_float(_to_float(row[f'{prefix}_std']), 2)}"
             for _, prefix, _ in TABLE_METRICS
@@ -351,7 +364,7 @@ def _summary_latex(summary_rows: List[Dict[str, object]]) -> str:
         r"\hline",
     ]
     for row in summary_rows:
-        cells = [_latex_escape(row["bundle"])]
+        cells = [_latex_escape(row.get("model", row["bundle"]))]
         for _, prefix, _ in TABLE_METRICS:
             mean = _fmt_float(_to_float(row[f"{prefix}_mean"]), 2)
             std = _fmt_float(_to_float(row[f"{prefix}_std"]), 2)
@@ -383,9 +396,12 @@ def _write_bundle_extremes(
     bundle_dir: Path,
     summary: Dict[str, Any],
     rows: List[Dict[str, object]],
+    prediction_dir="recon",
 ) -> str:
     """List the best and worst examples for each primary metric."""
     relpath = _bundle_relpath(root, bundle_dir)
+    if prediction_dir == "sinusoidal":
+        relpath += "/sinusoidal"
     safe_name = _safe_report_name(relpath)
     out_path = report_dir / f"extremes_{safe_name}.txt"
 
@@ -527,7 +543,7 @@ def _write_dashboard(path, bundles):
     path.write_text("\n".join(parts), encoding="utf-8")
 
 
-def _update_bundle_summary(bundle_dir, summary, metric_rows):
+def _update_bundle_summary(bundle_dir, summary, metric_rows, prediction_dir="recon"):
     """Replace stored aggregate scores with the current per-file evaluation."""
     summary.pop("metric_protocol", None)
     summary.pop("legacy_metrics", None)
@@ -536,19 +552,22 @@ def _update_bundle_summary(bundle_dir, summary, metric_rows):
     for key in metric_rows[0]:
         if key.startswith("test/"):
             current_metrics[key] = statistics.fmean(float(row[key]) for row in metric_rows)
-    summary["metrics"] = current_metrics
+    key = "metrics" if prediction_dir == "recon" else "sinusoidal_metrics"
+    summary[key] = current_metrics
 
     eval_dir = bundle_dir / "evaluation"
     (eval_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    _write_csv(eval_dir / "summary_metrics.csv", [current_metrics], sorted(current_metrics))
+    suffix = "" if prediction_dir == "recon" else "_sinusoidal"
+    _write_csv(eval_dir / f"summary{suffix}_metrics.csv", [current_metrics], sorted(current_metrics))
 
 
-def _write_bundle_statistics(bundle_dir, bundle_name, metric_rows):
+def _write_bundle_statistics(bundle_dir, bundle_name, metric_rows, prediction_dir="recon"):
     """Save the full per-metric distributions beside the per-file scores."""
     stats = _distribution_stats(bundle_name, metric_rows)
     eval_dir = bundle_dir / "evaluation"
-    _write_csv(eval_dir / "statistics.csv", stats, list(stats[0]))
-    (eval_dir / "statistics.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
+    suffix = "" if prediction_dir == "recon" else "_sinusoidal"
+    _write_csv(eval_dir / f"statistics{suffix}.csv", stats, list(stats[0]))
+    (eval_dir / f"statistics{suffix}.json").write_text(json.dumps(stats, indent=2) + "\n", encoding="utf-8")
     return stats
 
 
@@ -608,36 +627,49 @@ def main(argv: Optional[List[str]] = None) -> int:
         with summary_path.open("r", encoding="utf-8") as f:
             summary = json.load(f)
 
-        metric_rows = _load_or_compute_metric_rows(
-            bundle_dir, metrics, config_sha256, recompute=args.recompute
-        )
-        _update_bundle_summary(bundle_dir, summary, metric_rows)
-        relpath = _bundle_relpath(root, bundle_dir)
-        stats = _write_bundle_statistics(bundle_dir, relpath, metric_rows)
-        distributions.extend(stats)
-        plot_bundles.append((relpath, metric_rows))
-        for label in sorted({r["metric"] for r in stats}):
-            pack_stats = [r for r in stats if r["metric"] == label and r["group"].startswith("pack:")]
-            pack_macro.append({"bundle": relpath, "metric": label, "packs": len(pack_stats),
-                               "mean_of_pack_means": statistics.fmean(r["mean"] for r in pack_stats)})
-        overall = _summary_row(root, bundle_dir, summary, metric_rows)
-        summary_rows.append(overall)
-        model_rows.append(overall)
-        # Keep pack subsets in the numeric CSV; the paper table has one row per model.
-        grouped_rows = _group_rows(metric_rows)
-        if len(grouped_rows) > 2:
-            for group, subset in list(grouped_rows.items())[1:]:
-                summary_rows.append(_summary_row(
-                    root, bundle_dir, summary, subset, group.removeprefix("pack: ")
-                ))
-        report_name = _write_bundle_extremes(report_dir, root, bundle_dir, summary, metric_rows)
-        extremes_index.append(
-            {
-                "bundle": _bundle_relpath(root, bundle_dir),
-                "pack": _pack_label(summary),
-                "extremes_report": report_name,
-            }
-        )
+        # Older bundles remain usable; a present sinusoidal folder must be complete.
+        prediction_dirs = ["recon"]
+        if (bundle_dir / "sinusoidal").is_dir():
+            prediction_dirs.append("sinusoidal")
+        for prediction_dir in prediction_dirs:
+            metric_rows = _load_or_compute_metric_rows(
+                bundle_dir, metrics, config_sha256, recompute=args.recompute, prediction_dir=prediction_dir
+            )
+            _update_bundle_summary(bundle_dir, summary, metric_rows, prediction_dir)
+            relpath = _bundle_relpath(root, bundle_dir)
+            if prediction_dir == "sinusoidal":
+                relpath += "/sinusoidal"
+            stats = _write_bundle_statistics(bundle_dir, relpath, metric_rows, prediction_dir)
+            distributions.extend(stats)
+            plot_bundles.append((relpath, metric_rows))
+            for label in sorted({r["metric"] for r in stats}):
+                pack_stats = [r for r in stats if r["metric"] == label and r["group"].startswith("pack:")]
+                pack_macro.append({"bundle": relpath, "metric": label, "packs": len(pack_stats),
+                                   "mean_of_pack_means": statistics.fmean(r["mean"] for r in pack_stats)})
+            overall = _summary_row(root, bundle_dir, summary, metric_rows)
+            overall["bundle"] = relpath
+            overall["model"] = "Sinusoidal" if prediction_dir == "sinusoidal" else relpath
+            summary_rows.append(overall)
+            model_rows.append(overall)
+            # Keep pack subsets in the numeric CSV; the paper table has one row per model.
+            grouped_rows = _group_rows(metric_rows)
+            if len(grouped_rows) > 2:
+                for group, subset in list(grouped_rows.items())[1:]:
+                    pack_row = _summary_row(
+                        root, bundle_dir, summary, subset, group.removeprefix("pack: ")
+                    )
+                    pack_row["bundle"] = relpath
+                    summary_rows.append(pack_row)
+            report_name = _write_bundle_extremes(
+                report_dir, root, bundle_dir, summary, metric_rows, prediction_dir
+            )
+            extremes_index.append(
+                {
+                    "bundle": relpath,
+                    "pack": _pack_label(summary),
+                    "extremes_report": report_name,
+                }
+            )
 
     # Stable sorting makes report diffs independent of filesystem traversal order.
     summary_rows = sorted(summary_rows, key=lambda row: str(row["bundle"]))

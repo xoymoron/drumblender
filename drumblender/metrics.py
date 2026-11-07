@@ -77,13 +77,15 @@ def evaluation_score_keys(metrics):
     return keys
 
 
-def audio_pair_fingerprint(bundle_dir, source_filename):
+def audio_pair_fingerprint(bundle_dir, source_filename, prediction_dir="recon"):
     """Invalidate cached scores if either exported WAV changes (or disappears)."""
     relative = Path(str(source_filename).replace("\\", "/"))
     if relative.anchor or ".." in relative.parts:
         raise ValueError(f"Unsafe audio path: {source_filename}")
     digest = hashlib.sha256()
-    for kind in ("recon", "target"):
+    if prediction_dir not in ("recon", "sinusoidal"):
+        raise ValueError(f"Unknown reconstruction directory: {prediction_dir}")
+    for kind in (prediction_dir, "target"):
         path = Path(bundle_dir) / kind / relative
         digest.update(kind.encode())
         if path.is_file():

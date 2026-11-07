@@ -3,6 +3,8 @@
 import argparse
 import csv
 import hashlib
+import json
+import shutil
 from pathlib import Path
 
 import soundfile as sf
@@ -10,6 +12,7 @@ import torch
 from tqdm import tqdm
 
 from drumblender.data import JointResynthesisDataset
+from drumblender.metrics import DEFAULT_METRICS_CONFIG
 from drumblender.synths.noise_band import SAMPLE_RATE, load_noise_bank
 from drumblender.tasks.joint_resynthesis import (
     DIAGNOSTICS,
@@ -24,6 +27,16 @@ def write_rows(path, rows):
         writer = csv.DictWriter(file, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+
+
+@torch.inference_mode()
+def render_sinusoidal(item, synth):
+    """Render the analyzed amplitudes and phases on their original frame clock."""
+    if item["params"].shape[1] == 0:
+        return torch.zeros_like(item["audio"])
+    return synth(
+        item["params"][None], item["length"], item["analysis_num_samples"]
+    )[0]
 
 
 @torch.inference_mode()
@@ -70,11 +83,14 @@ def main():
         parser.error(f"Empty {args.split} split.")
 
     args.output.mkdir(parents=True, exist_ok=False)
-    folders = ["target", "recon", "evaluation"]
+    folders = ["target", "recon", "sinusoidal", "evaluation", "configs"]
     if args.branches:
         folders.extend(("modal", "noise", "transient", "t_off"))
     for folder in folders:
         (args.output / folder).mkdir()
+    shutil.copyfile(
+        DEFAULT_METRICS_CONFIG, args.output / "configs" / "evaluation_metrics.yaml"
+    )
 
     losses, diagnostics = [], []
     for item in tqdm(dataset, total=len(dataset), unit="clip"):
@@ -96,7 +112,11 @@ def main():
         }
         losses.append({**row, **dict(zip(LOSS_NAMES, terms.cpu().tolist()))})
         diagnostics.append({**row, **dict(zip(DIAGNOSTICS, values.cpu().tolist()))})
-        signals = {"target": item["audio"], "recon": result.waveform * result.gain}
+        signals = {
+            "target": item["audio"],
+            "recon": result.waveform * result.gain,
+            "sinusoidal": render_sinusoidal(item, task.model.modal_synth),
+        }
         if args.branches:
             signals.update(
                 modal=result.modal_waveform * result.gain,
@@ -113,6 +133,16 @@ def main():
             )
     write_rows(args.output / "evaluation" / "per_file_loss.csv", losses)
     write_rows(args.output / "evaluation" / "per_file_diagnostics.csv", diagnostics)
+    summary = {
+        "checkpoint": str(args.checkpoint.resolve()),
+        "items": len(dataset),
+        "split": args.split,
+        "seed": task.hparams.seed,
+        "sinusoidal": "Direct cached modal synthesis before learned corrections",
+    }
+    (args.output / "evaluation" / "summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
