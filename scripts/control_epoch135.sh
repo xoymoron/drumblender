@@ -19,6 +19,11 @@ paired=("${common[@]}" --warmup "$CONTROL_ROOT/warmup/best.pt"
         --output "$CONTROL_ROOT/paired" --minutes 120 --max-minutes 180)
 
 case "$stage" in
+  serve)
+    "$PYTHON" -m scripts.serve_control_audition "${common[@]}" \
+      --run "$CONTROL_ROOT/paired" --directory "$CONTROL_ROOT/paired/audition" \
+      --port 8766 "$@"
+    ;;
   run)
     if [[ $# -ne 0 ]]; then
       echo 'The fresh run uses the fixed protocol; configure paths through environment variables.' >&2
@@ -63,6 +68,7 @@ case "$stage" in
   help|-h|--help)
     printf '%s\n' 'run: fresh cache -> common warm-up -> paired training (no audition/test)' \
       'Stages: cache -> warmup -> train -> audition -> test ID1 ID2 -> analyze' \
+      'serve: fixed examples plus on-demand random validation audition on port 8766' \
       'Run on DSP_sjh only. No stage has been started by showing this help.' \
       'Warm-up + paired fit/validation: target 120 min, cap 180 min.'
     ;;
