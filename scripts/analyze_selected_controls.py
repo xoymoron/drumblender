@@ -177,7 +177,10 @@ def summarize(root):
         pairs, key=lambda r: -max(r["same"], r["reversed"])
     )
     result["redundancy"]["selected_pair"] = next(
-        r for r in pairs if {r["a"], r["b"]} == set(selected_atoms)
+        (r for r in pairs if {r["a"], r["b"]} == set(selected_atoms)),
+        dict(
+            a=selected_atoms[0], b=selected_atoms[1], same=None, reversed=None, clips=0
+        ),
     )
     curves = read(root / "curves.json")
     result["sweep"] = {}
@@ -368,8 +371,9 @@ def report(root, s):
         "observer normalization-floor signals are excluded with explicit support counts. "
         "Balanced scores average available S/N/mix cosines per clip; no threshold merges features.",
         "",
-        f"For {first} versus {second}: same-sign cosine **{selected['same']:.3f}**, "
-        f"reversed-sign cosine **{selected['reversed']:.3f}**, support **{selected['clips']} clips**. "
+        f"For {first} versus {second}: same-sign cosine **{selected['same']}**, "
+        f"reversed-sign cosine **{selected['reversed']}**, support **{selected['clips']} clips**. "
+        "Null values mean no shared valid support in the fixed redundancy subset. "
         "This measures acoustic overlap in these views, not identity of the learned controls.",
         "",
         "| Pair | Same sign | Reversed sign | Valid clips |",
