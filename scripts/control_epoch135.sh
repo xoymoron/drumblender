@@ -19,6 +19,22 @@ paired=("${common[@]}" --warmup "$CONTROL_ROOT/warmup/best.pt"
         --output "$CONTROL_ROOT/paired" --minutes 120 --max-minutes 180)
 
 case "$stage" in
+  run)
+    if [[ $# -ne 0 ]]; then
+      echo 'The fresh run uses the fixed protocol; configure paths through environment variables.' >&2
+      exit 2
+    fi
+    mkdir -p "$(dirname "$CONTROL_ROOT")"
+    mkdir "$CONTROL_ROOT"
+    (
+      trap 'status=$?; printf "Pipeline exit=%s at %s\n" "$status" "$(date -Is)"' EXIT
+      for phase in cache warmup train; do
+        printf '\n=== %s | %s ===\n' "$phase" "$(date -Is)"
+        bash scripts/control_epoch135.sh "$phase" || exit "$?"
+      done
+      printf '\nTraining complete. Audition and held-out evaluation have not been started.\n'
+    ) 2>&1 | tee "$CONTROL_ROOT/console.log"
+    ;;
   cache)
     "$PYTHON" -m scripts.control_joint cache "${common[@]}" "$@"
     ;;
@@ -45,7 +61,8 @@ case "$stage" in
     "$PYTHON" -m scripts.analyze_selected_controls "$CONTROL_ROOT/selected" "$@"
     ;;
   help|-h|--help)
-    printf '%s\n' 'Stages: cache -> warmup -> train -> audition -> test ID1 ID2 -> analyze' \
+    printf '%s\n' 'run: fresh cache -> common warm-up -> paired training (no audition/test)' \
+      'Stages: cache -> warmup -> train -> audition -> test ID1 ID2 -> analyze' \
       'Run on DSP_sjh only. No stage has been started by showing this help.' \
       'Warm-up + paired fit/validation: target 120 min, cap 180 min.'
     ;;

@@ -243,6 +243,14 @@ def train_sae(args):
     deadline = start + args.max_minutes * 60
     epoch = 0
     history = []
+    progress = tqdm(
+        total=args.minutes * 60,
+        desc="SAE warm-up",
+        unit="s",
+        dynamic_ncols=True,
+        mininterval=1,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}{postfix}]",
+    )
     while time.monotonic() < target or step == 0:
         epoch += 1
         for _, batch in batches(train, rng.permutation(len(train.starts)), args.device):
@@ -256,15 +264,21 @@ def train_sae(args):
             optimizer.step()
             step += 1
             frame_total += nframes
+            progress.update(min(time.monotonic() - start, progress.total) - progress.n)
             if step == 20 or step % 100 == 0:
                 current_loss = float(loss.detach())
                 elapsed = time.monotonic() - start
-                print(
+                progress.set_postfix(
+                    step=step, loss=f"{current_loss:.5f}", refresh=False
+                )
+                tqdm.write(
                     f"{step:,} steps | {frame_total / elapsed:,.0f} valid frames/s (run average) | MSE+AuxK {current_loss:.5f}",
-                    flush=True,
                 )
 
+        progress.set_description("Warm-up validation")
         measured = validate(sae, val, mean, std, deadline)
+        progress.update(min(time.monotonic() - start, progress.total) - progress.n)
+        progress.set_description("SAE warm-up")
         if measured is None:
             break
         score, dead = measured
@@ -278,7 +292,7 @@ def train_sae(args):
         }
         history.append(entry)
         write_json(args.output / "training.json", history)
-        print(json.dumps(entry), flush=True)
+        tqdm.write(json.dumps(entry))
         if score < best:
             best = score
             save_best(
@@ -292,6 +306,7 @@ def train_sae(args):
                     **entry,
                 },
             )
+    progress.close()
     if not ckpt.is_file():
         raise RuntimeError("The time cap expired before a complete validation pass.")
     # Budget the entire invocation, not the time of the best validation epoch.

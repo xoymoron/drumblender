@@ -52,6 +52,13 @@ bash scripts/control_epoch135.sh train
 bash scripts/control_epoch135.sh audition
 ```
 
+`bash scripts/control_epoch135.sh run` executes the first three stages in order
+in a fresh output root, stops on any failure, and saves `console.log`. Cache,
+warm-up and paired training show tqdm progress. The paired display includes
+both latent losses, intervention loss, matched update count and elapsed/remaining
+time. It does not launch audition or held-out test. Use this command in the
+`drmblndr` tmux session on DSP_sjh; other sessions/runs need not be interrupted.
+
 The default root is `runs/control_epoch135_clean`. Existing cache/warm-up/run
 folders are not overwritten. Training alone does not render or evaluate test.
 The audition is `paired/audition/index.html`, with branch solos and a comparison

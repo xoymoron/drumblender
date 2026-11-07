@@ -392,10 +392,20 @@ def fit(run, sae, baseline, objective, calibration, output):
         trace_rows.clear()
 
     if not run.args.resume:
+        print("Initial paired validation", flush=True)
         initial = validate(run, sae, baseline, objective, calibration, hard_end - 600)
         write_json(output / "initial_validation.json", initial)
         print("INITIAL", json.dumps(initial), flush=True)
         snapshot("latest.pt", True)
+    progress = tqdm(
+        total=max(0, update_end - started),
+        initial=min(time.monotonic() - started, max(0, update_end - started)),
+        desc="Paired SAE",
+        unit="s",
+        dynamic_ncols=True,
+        mininterval=1,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}{postfix}]",
+    )
     while (
         groups < run.args.groups
         and time.monotonic() + max(2 * last_seconds, 10) < update_end
@@ -508,6 +518,15 @@ def fit(run, sae, baseline, objective, calibration, output):
         if batch_metrics:
             read_optim.step()
         last_seconds = time.monotonic() - tick
+        progress.set_postfix(
+            step=step,
+            groups=groups,
+            main=f"{float(loss_h.detach()):.4f}",
+            comparison=f"{float(loss_b.detach()):.4f}",
+            int=f"{means(batch_metrics).get('intervention', 0):.3f}",
+            refresh=False,
+        )
+        progress.update(min(time.monotonic() - started, progress.total) - progress.n)
         rolling.append(
             dict(
                 latent_loss=float(loss_h.detach()),
@@ -530,19 +549,23 @@ def fit(run, sae, baseline, objective, calibration, output):
             history.append(entry)
             rolling.clear()
             write_json(output / "training.json", history)
-            print("TRAIN", json.dumps(entry), flush=True)
+            tqdm.write("TRAIN " + json.dumps(entry))
             flush_trace()
         if step % 1000 == 0:
             if time.monotonic() + 120 < update_end:
+                progress.set_description("Paired validation")
                 result = validate(
                     run, sae, baseline, objective, calibration, update_end - 30
                 )
                 result.update(step=step, groups=groups)
                 with (output / "validation.jsonl").open("a", encoding="utf-8") as file:
                     file.write(json.dumps(result) + "\n")
-                print("VALIDATION", json.dumps(result), flush=True)
+                tqdm.write("VALIDATION " + json.dumps(result))
+                progress.set_description("Paired SAE")
             snapshot("latest.pt", True)
         del codes, ref, loss_h, loss_b
+    progress.close()
+    print("Final paired validation and checkpoint", flush=True)
     flush_trace()
     snapshot("latest.pt", True)
     final = snapshot("final.pt")
