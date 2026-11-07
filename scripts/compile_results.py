@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Compile reconstruction evaluation from one exported bundle or a run directory.
 
-The main table reports MR-STFT, LSD, and temporal SF. Per-file and per-pack
-statistics, supplementary metrics, and distribution plots are saved alongside it.
+The main table reports MSS, LSD, bandwise LSD, SF, and MFCC to two decimal places.
+Per-file and per-pack statistics retain full precision in the CSV and JSON reports.
 """
 
 from __future__ import annotations
@@ -47,23 +47,27 @@ PLOT_FIRST_ROW = 48
 PLOT_BASE_HEIGHT = 60
 PLOT_GRID_INTERVALS = 4
 RANK_METRICS = [
-    # Keep the paper table and ranking focused on these three primary metrics.
+    # Rank individual examples by these three primary reconstruction errors.
     ("MR-STFT", "test/mr_stft"),
     ("LSD", "test/lsd"),
     # Retain the CSV key for compatibility; it now stores temporal spectral flux.
     ("SF", "test/flux_onset"),
 ]
 DIAGNOSTIC_LABELS = {"test/mfcc": "MFCC"}
-SUMMARY_HEADERS = [
-    "bundle",
-    "pack",
-    "items",
-    "mr_stft_mean",
-    "mr_stft_std",
-    "lsd_mean",
-    "lsd_std",
-    "sf_mean",
-    "sf_std",
+TABLE_METRICS = [
+    # Display names are independent of the metric cache and training loss keys.
+    ("MSS", "mr_stft", "test/mr_stft"),
+    ("LSD", "lsd", "test/lsd"),
+    ("LSD low", "lsd_low", "test/band_lsd_low"),
+    ("LSD mid", "lsd_mid", "test/band_lsd_mid"),
+    ("LSD high", "lsd_high", "test/band_lsd_high"),
+    ("SF", "sf", "test/flux_onset"),
+    ("MFCC", "mfcc", "test/mfcc"),
+]
+SUMMARY_HEADERS = ["bundle", "pack", "items"] + [
+    f"{prefix}_{statistic}"
+    for _, prefix, _ in TABLE_METRICS
+    for statistic in ("mean", "std")
 ]
 
 
@@ -302,73 +306,58 @@ def _summary_row(
     rows: List[Dict[str, object]],
     pack_override: Optional[str] = None,
 ) -> Dict[str, object]:
-    """Summarize the three primary metrics for one bundle or pack subset."""
-    mr_stft_mean, mr_stft_std = _mean_std(_to_float(r.get("test/mr_stft")) for r in rows)
-    lsd_mean, lsd_std = _mean_std(_to_float(r.get("test/lsd")) for r in rows)
-    sf_mean, sf_std = _mean_std(_to_float(r.get("test/flux_onset")) for r in rows)
-    return {
+    """Summarize all table metrics for one bundle or pack subset."""
+    result = {
         "bundle": _bundle_relpath(root, bundle_dir),
         "pack": pack_override if pack_override is not None else _pack_label(summary),
         "items": len(rows),
-        "mr_stft_mean": mr_stft_mean,
-        "mr_stft_std": mr_stft_std,
-        "lsd_mean": lsd_mean,
-        "lsd_std": lsd_std,
-        "sf_mean": sf_mean,
-        "sf_std": sf_std,
     }
+    for _, prefix, column in TABLE_METRICS:
+        mean, std = _mean_std(_to_float(row.get(column)) for row in rows)
+        result[f"{prefix}_mean"] = mean
+        result[f"{prefix}_std"] = std
+    return result
 
 
 def _summary_markdown(summary_rows: List[Dict[str, object]]) -> str:
-    """Render the primary per-bundle scores as a Markdown table."""
+    """Render one mean and population SD cell per metric and model."""
     rows = [
-        [
-            row["bundle"],
-            row["pack"],
-            row["items"],
-            _fmt_float(_to_float(row["mr_stft_mean"])),
-            _fmt_float(_to_float(row["mr_stft_std"])),
-            _fmt_float(_to_float(row["lsd_mean"])),
-            _fmt_float(_to_float(row["lsd_std"])),
-            _fmt_float(_to_float(row["sf_mean"])),
-            _fmt_float(_to_float(row["sf_std"])),
+        [row["bundle"]] + [
+            f"{_fmt_float(_to_float(row[f'{prefix}_mean']), 2)} ± "
+            f"{_fmt_float(_to_float(row[f'{prefix}_std']), 2)}"
+            for _, prefix, _ in TABLE_METRICS
         ]
         for row in summary_rows
     ]
-    return _markdown_table(SUMMARY_HEADERS, rows)
+    headers = ["Model"] + [f"{label} ↓" for label, _, _ in TABLE_METRICS]
+    return _markdown_table(headers, rows)
 
 
 def _summary_latex(summary_rows: List[Dict[str, object]]) -> str:
-    """Build the compact paper table; supplementary metrics stay in the reports."""
+    """Build the paper table with one overall row per exported model."""
     lines = [
         r"\begin{table*}[t]",
         r"\centering",
-        r"\caption{Test-set reconstruction errors by top-level sample pack. Values are per-file mean $\pm$ standard deviation; lower is better. The all row is sample-weighted.}",
+        r"\caption{Test-set reconstruction errors (per-clip mean $\pm$ population standard deviation). MSS denotes the multi-resolution STFT error, and SF denotes the spectral flux onset error. The low, mid, and high LSD bands are 20--250~Hz, 250~Hz--4~kHz, and 4--20~kHz, respectively. Lower is better ($\downarrow$).}",
         r"\label{tab:reconstruction-evaluation}",
-        r"\footnotesize",
-        r"\setlength{\tabcolsep}{4pt}",
-        r"\begin{tabular}{llrccc}",
+        r"\scriptsize",
+        r"\setlength{\tabcolsep}{2.5pt}",
+        r"\resizebox{\linewidth}{!}{%",
+        r"\begin{tabular}{@{}lccccccc@{}}",
         r"\hline",
-        r"Run & Pack & $N$ & MR-STFT $\downarrow$ & LSD $\downarrow$ & SF $\downarrow$ \\",
+        "Model & " + " & ".join(
+            label + r" $\downarrow$" for label, _, _ in TABLE_METRICS
+        ) + r" \\",
         r"\hline",
     ]
-    previous_bundle = None
     for row in summary_rows:
-        if previous_bundle is not None and row["bundle"] != previous_bundle:
-            lines.append(r"\hline")
-        bundle = _latex_escape(row["bundle"]) if row["bundle"] != previous_bundle else ""
-        pack = _latex_escape(row["pack"])
-        n_items = _latex_escape(row["items"])
-        def cell(prefix, row=row):
-            mean = _fmt_float(_to_float(row[f"{prefix}_mean"]), 3)
-            std = _fmt_float(_to_float(row[f"{prefix}_std"]), 3)
-            return f"${mean} \\pm {std}$"
-        lines.append(
-            f"{bundle} & {pack} & {n_items} & {cell('mr_stft')} & "
-            f"{cell('lsd')} & {cell('sf')} \\\\"
-        )
-        previous_bundle = row["bundle"]
-    lines.extend([r"\hline", r"\end{tabular}", r"\end{table*}"])
+        cells = [_latex_escape(row["bundle"])]
+        for _, prefix, _ in TABLE_METRICS:
+            mean = _fmt_float(_to_float(row[f"{prefix}_mean"]), 2)
+            std = _fmt_float(_to_float(row[f"{prefix}_std"]), 2)
+            cells.append(f"${mean} \\pm {std}$")
+        lines.append(" & ".join(cells) + r" \\")
+    lines.extend([r"\hline", r"\end{tabular}%", "}", r"\end{table*}"])
     return "\n".join(lines) + "\n"
 
 
@@ -607,6 +596,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows: List[Dict[str, object]] = []
+    model_rows: List[Dict[str, object]] = []
     extremes_index: List[Dict[str, object]] = []
     distributions = []
     plot_bundles = []
@@ -630,8 +620,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             pack_stats = [r for r in stats if r["metric"] == label and r["group"].startswith("pack:")]
             pack_macro.append({"bundle": relpath, "metric": label, "packs": len(pack_stats),
                                "mean_of_pack_means": statistics.fmean(r["mean"] for r in pack_stats)})
-        summary_rows.append(_summary_row(root, bundle_dir, summary, metric_rows))
-        # Pack rows are subsets of the overall row; both views appear in the table.
+        overall = _summary_row(root, bundle_dir, summary, metric_rows)
+        summary_rows.append(overall)
+        model_rows.append(overall)
+        # Keep pack subsets in the numeric CSV; the paper table has one row per model.
         grouped_rows = _group_rows(metric_rows)
         if len(grouped_rows) > 2:
             for group, subset in list(grouped_rows.items())[1:]:
@@ -650,11 +642,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Stable sorting makes report diffs independent of filesystem traversal order.
     summary_rows = sorted(summary_rows, key=lambda row: str(row["bundle"]))
     summary_table_txt = report_dir / "summary_table.txt"
-    summary_table_txt.write_text(_summary_markdown(summary_rows) + "\n", encoding="utf-8")
+    summary_table_txt.write_text(_summary_markdown(model_rows) + "\n", encoding="utf-8")
     _write_csv(report_dir / "summary_table.csv", summary_rows, SUMMARY_HEADERS)
     tex_out = Path(args.tex_out).resolve() if args.tex_out is not None else report_dir / "summary_table.tex"
     tex_out.parent.mkdir(parents=True, exist_ok=True)
-    tex_out.write_text(_summary_latex(summary_rows), encoding="utf-8")
+    tex_out.write_text(_summary_latex(model_rows), encoding="utf-8")
     _write_csv(report_dir / "extremes_index.csv", extremes_index, ["bundle", "pack", "extremes_report"])
     _write_csv(report_dir / "distribution_stats.csv", distributions, list(distributions[0]))
     _write_csv(report_dir / "pack_macro.csv", pack_macro, list(pack_macro[0]))
